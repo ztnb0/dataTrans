@@ -15,12 +15,34 @@ from typing import List, Optional
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+ENV_PATH = os.path.join(BASE_DIR, '.env')
+
+
+def load_env():
+    """从 .env 文件读取 KEY=VALUE 到 os.environ（不覆盖已存在的环境变量）"""
+    if not os.path.exists(ENV_PATH):
+        return
+    with open(ENV_PATH, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
+load_env()
+
 app = FastAPI(title='dataTrans', version='1.0.0')
 
-# ---------- 简道云配置（固定） ----------
-JDY_API_KEY = 'IixdgmswnuyovgnJ2zscgYwRFqoVbM9c049A824F98c7365F39913D1C5F5A2166'
-JDY_APP_ID = '598d1c563788a36bcba8a193'
-JDY_ENTRY_ID = '6aa0bbef65115c860c3a7bfd'
+# ---------- 简道云配置（APIKey 来自 .env） ----------
+JDY_API_KEY = os.environ.get('JDY_API_KEY', '')
+JDY_APP_ID = os.environ.get('JDY_APP_ID', '598d1c563788a36bcba8a193')
+JDY_ENTRY_ID = os.environ.get('JDY_ENTRY_ID', '6aa0bbef65115c860c3a7bfd')
 JDY_BASE = 'https://api.jiandaoyun.com/api/v5'
 
 JDY_HEADERS = {
@@ -37,8 +59,13 @@ JDY_CODE_KEY = '_widget_1788918827860'       # 项目编号
 JDY_NAME_KEY = '_widget_1788918827861'       # 项目名称
 JDY_TIME_KEY = '_widget_1788918827862'       # 平台数据创建时间
 
-# ---------- 数据源配置（来自 config.json） ----------
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+# ---------- 数据源配置（来自 config.json，密码来自 .env） ----------
+
+
+def password_env_key(source_id):
+    """数据源 id -> 环境变量名，如 dpt-182 -> DB_DPT_182_PASSWORD"""
+    return 'DB_' + source_id.replace('-', '_').upper() + '_PASSWORD'
+
 
 # 默认数据源（config.json 缺失/为空时的回退）
 DEFAULT_SOURCE = {
@@ -47,7 +74,6 @@ DEFAULT_SOURCE = {
     'host': '192.168.2.182',
     'port': 3306,
     'user': 'dpt_dev',
-    'password': 'dev20161111',
     'charset': 'gbk',
 }
 
@@ -78,10 +104,22 @@ def get_source(source_id):
     return SOURCES[source_id]
 
 
+def get_password(source_id):
+    """优先取 config.json 里的 password（向后兼容），否则取环境变量"""
+    s = get_source(source_id)
+    if s.get('password'):
+        return s['password']
+    pwd = os.environ.get(password_env_key(source_id), '')
+    if not pwd:
+        raise HTTPException(400, '数据源 %s 缺少密码：请在 .env 中配置 %s' %
+                            (source_id, password_env_key(source_id)))
+    return pwd
+
+
 def get_conn(source_id):
     s = get_source(source_id)
     return pymysql.connect(host=s['host'], port=int(s.get('port', 3306)),
-                           user=s['user'], password=s['password'],
+                           user=s['user'], password=get_password(source_id),
                            charset=s.get('charset', 'utf8mb4'))
 
 

@@ -2,11 +2,18 @@
   "sources": [
     {
       "id": "dpt-182",
-      "name": "主库 192.168.2.182",
+      "name": "182测试数据库",
       "host": "192.168.2.182",
       "port": 3306,
       "user": "dpt_dev",
-      "password": "dev20161111",
+      "charset": "gbk"
+    },
+    {
+      "id": "dpt-aliyun",
+      "name": "aliyun线上数据库",
+      "host": "dptonlyread.rwlb.rds.aliyuncs.com",
+      "port": 3306,
+      "user": "dptep",
       "charset": "gbk"
     }
   ]
