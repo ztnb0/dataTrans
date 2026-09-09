@@ -2,6 +2,7 @@
   "sources": [
     {
       "id": "dpt-182",
+      "type": "mysql",
       "name": "182测试数据库",
       "host": "192.168.2.182",
       "port": 3306,
@@ -10,11 +11,23 @@
     },
     {
       "id": "dpt-aliyun",
+      "type": "mysql",
       "name": "aliyun线上数据库",
       "host": "dptonlyread.rwlb.rds.aliyuncs.com",
       "port": 3306,
       "user": "dptep",
       "charset": "gbk"
+    },
+    {
+      "id": "oracle-clazz",
+      "type": "oracle",
+      "name": "Oracle线上库(班级)",
+      "host": "114.113.151.60",
+      "port": 1521,
+      "user": "clazz",
+      "service": "ORCL",
+      "schemas": ["BFEC", "SHFEC", "GZFEC"],
+      "instant_client": "D:/Program Files/OracleInstantClient/instantclient_21_15"
     }
   ]
 }

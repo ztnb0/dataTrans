@@ -147,6 +147,10 @@ let excludedIds = new Set(); // 取消勾选的 _row_id
 let page = 0;
 const PAGE_SIZE = 50;
 let currentTimeField = '';  // 当前勾选中的时间字段名
+let currentSourceType = 'mysql';   // 当前数据源类型 mysql/oracle
+let currentSourceSchemas = [];     // oracle 多 schema 列表
+let currentIsMerge = false;        // 是否"全部合并"模式
+let previewHasSchema = false;      // 预览是否带来源(schema)列
 
 const $ = id => document.getElementById(id);
 
@@ -164,6 +168,8 @@ async function loadSources() {
   if (sourceList.length > 0) {
     $('source').value = sourceList[0].name;
     currentSourceId = sourceList[0].id;
+    currentSourceType = sourceList[0].type || 'mysql';
+    currentSourceSchemas = sourceList[0].schemas || [];
   }
   renderSourceDrop();
   await loadDatabases();
@@ -186,6 +192,9 @@ function renderSourceDrop() {
     o.onclick = () => {
       $('source').value = o.getAttribute('data-name');
       currentSourceId = o.getAttribute('data-id');
+      const s = sourceList.find(x => x.id === currentSourceId);
+      currentSourceType = s ? (s.type || 'mysql') : 'mysql';
+      currentSourceSchemas = s ? (s.schemas || []) : [];
       dd.style.display = 'none';
       loadDatabases();
     };
@@ -195,8 +204,14 @@ function renderSourceDrop() {
 async function loadDatabases() {
   if (!currentSourceId) { dbList = []; $('db').value = ''; renderDrop('db', dbList, onPickDb); return; }
   const r = await fetch('/api/databases?source=' + encodeURIComponent(currentSourceId)).then(x => x.json());
-  dbList = r.databases;
+  let dbs = r.databases || [];
+  if (currentSourceType === 'oracle' && currentSourceSchemas.length > 1) {
+    dbList = ['__ALL__'].concat(dbs);   // 最前加"全部合并"
+  } else {
+    dbList = dbs;
+  }
   if (dbList.includes('dpt_product')) $('db').value = 'dpt_product';
+  else if (dbList.length > 0) $('db').value = dbList[0];
   else $('db').value = '';
   renderDrop('db', dbList, onPickDb);
   await loadTables();
@@ -204,10 +219,20 @@ async function loadDatabases() {
 
 async function loadTables() {
   const db = $('db').value.trim();
+  currentIsMerge = (currentSourceType === 'oracle' && db === '__ALL__');
   if (!db) { tableList = []; $('table').value = ''; renderDrop('table', tableList, onPickTable); return; }
+  if (currentIsMerge) {
+    // 合并模式：表固定为 CLAZZ（三个 schema 都有），无需查表
+    tableList = ['CLAZZ'];
+    $('table').value = 'CLAZZ';
+    renderDrop('table', tableList, onPickTable);
+    await loadColumns();
+    return;
+  }
   const r = await fetch('/api/tables?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db)).then(x => x.json());
   tableList = r.tables;
   if (tableList.includes('coaching_class')) $('table').value = 'coaching_class';
+  else if (tableList.length > 0) $('table').value = tableList[0];
   else $('table').value = '';
   renderDrop('table', tableList, onPickTable);
   await loadColumns();
@@ -215,8 +240,10 @@ async function loadTables() {
 
 async function loadColumns() {
   const db = $('db').value.trim(), table = $('table').value.trim();
+  currentIsMerge = (currentSourceType === 'oracle' && db === '__ALL__');
   if (!db || !table) { dbColumns = []; $('dbFields').innerHTML = ''; currentTimeField = ''; updateTimeFilterUI(); return; }
-  const r = await fetch('/api/columns?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db) + '&table=' + encodeURIComponent(table)).then(x => x.json());
+  const qdb = currentIsMerge ? currentSourceSchemas[0] : db;
+  const r = await fetch('/api/columns?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(qdb) + '&table=' + encodeURIComponent(table)).then(x => x.json());
   dbColumns = r.columns;
   primaryKey = r.primary_key || 'id';
   const box = $('dbFields');
@@ -247,7 +274,10 @@ function renderDrop(id, items, onPick) {
   if (filtered.length === 0) {
     dd.innerHTML = '<div class="empty">无匹配</div>';
   } else {
-    dd.innerHTML = filtered.map(x => '<div class="opt" data-v="' + x + '">' + x + '</div>').join('');
+    dd.innerHTML = filtered.map(x => {
+      const label = x === '__ALL__' ? '全部合并(' + currentSourceSchemas.join('/') + ')' : x;
+      return '<div class="opt" data-v="' + x + '">' + label + '</div>';
+    }).join('');
   }
   dd.style.display = 'block';
   dd.querySelectorAll('.opt').forEach(o => {
@@ -280,14 +310,31 @@ function getSelectedDbFields() {
   return [...document.querySelectorAll('#dbFields input:checked')].map(i => i.value);
 }
 
-// 判断字段是否为时间类型
+// 判断字段是否为时间类型（Oracle 的年份数字字段也视为时间字段）
 function isTimeField(name) {
   const c = dbColumns.find(x => x.name === name);
-  return c ? /date|time/i.test(c.type) : false;
+  if (!c) return false;
+  const t = (c.type || '').toLowerCase();
+  if (t.includes('date') || t.includes('time')) return true;
+  // Oracle 年份数字字段：如 BEGIN_YEAR（NUMBER 类型，但语义是年份）
+  const n = name.toUpperCase();
+  if (currentSourceType === 'oracle' && (n === 'BEGIN_YEAR' || n.endsWith('_YEAR'))) return true;
+  return false;
 }
 
-// 生成年月日三级下拉；prefix='to' 时默认选中今天
-function buildDatePicker(prefix) {
+// 判断时间字段是否为 Oracle 数字年份（只筛年）
+function isYearField(name) {
+  if (currentSourceType !== 'oracle') return false;
+  const c = dbColumns.find(x => x.name === name);
+  if (!c) return false;
+  const t = (c.type || '').toLowerCase();
+  if (t.includes('date') || t.includes('time')) return false;
+  const n = name.toUpperCase();
+  return n === 'BEGIN_YEAR' || n.endsWith('_YEAR');
+}
+
+// 生成年月日三级下拉；prefix='to' 时默认选中今天；yearOnly 只显示年
+function buildDatePicker(prefix, yearOnly) {
   const now = new Date();
   const today = { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
   const isTo = prefix === 'to';
@@ -298,18 +345,21 @@ function buildDatePicker(prefix) {
     html += '<option value="' + y + '"' + sel + '>' + y + '</option>';
   }
   html += '</select></div>';
-  html += '<div><select id="' + prefix + '_m" onchange="onDateChange(\'' + prefix + '\')"><option value="">月</option>';
-  for (let m = 1; m <= 12; m++) {
-    const sel = isTo && m === today.m ? ' selected' : '';
-    html += '<option value="' + m + '"' + sel + '>' + m + '月</option>';
+  if (!yearOnly) {
+    html += '<div><select id="' + prefix + '_m" onchange="onDateChange(\'' + prefix + '\')"><option value="">月</option>';
+    for (let m = 1; m <= 12; m++) {
+      const sel = isTo && m === today.m ? ' selected' : '';
+      html += '<option value="' + m + '"' + sel + '>' + m + '月</option>';
+    }
+    html += '</select></div>';
+    html += '<div><select id="' + prefix + '_d"><option value="">日</option>';
+    for (let d = 1; d <= 31; d++) {
+      const sel = isTo && d === today.d ? ' selected' : '';
+      html += '<option value="' + d + '"' + sel + '>' + d + '日</option>';
+    }
+    html += '</select></div>';
   }
-  html += '</select></div>';
-  html += '<div><select id="' + prefix + '_d"><option value="">日</option>';
-  for (let d = 1; d <= 31; d++) {
-    const sel = isTo && d === today.d ? ' selected' : '';
-    html += '<option value="' + d + '"' + sel + '>' + d + '日</option>';
-  }
-  html += '</select></div></div>';
+  html += '</div>';
   return html;
 }
 
@@ -324,10 +374,9 @@ function updateTimeFilterUI() {
   }
   box.style.display = 'block';
   $('timeFieldName').textContent = currentTimeField;
-  if (!$('dateFromRow').innerHTML) {
-    $('dateFromRow').innerHTML = buildDatePicker('from');
-    $('dateToRow').innerHTML = buildDatePicker('to');
-  }
+  const yearOnly = isYearField(currentTimeField);
+  $('dateFromRow').innerHTML = buildDatePicker('from', yearOnly);
+  $('dateToRow').innerHTML = buildDatePicker('to', yearOnly);
 }
 
 function onDateChange(prefix) {
@@ -425,17 +474,22 @@ async function previewTransfer() {
   log('正在生成预览…');
 
   try {
+    const body = {
+      source: currentSourceId,
+      database: db, table: table,
+      source_fields: sourceFields, target_fields: targetFields,
+      platform_value: platform, limit: limit,
+      time_field: timeField,
+      date_from: date_from, date_to: date_to
+    };
+    if (currentIsMerge && currentSourceSchemas.length > 1) {
+      body.database = currentSourceSchemas[0];
+      body.schemas = currentSourceSchemas;
+    }
     const resp = await fetch('/api/transfer/preview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        source: currentSourceId,
-        database: db, table: table,
-        source_fields: sourceFields, target_fields: targetFields,
-        platform_value: platform, limit: limit,
-        time_field: timeField,
-        date_from: date_from, date_to: date_to
-      })
+      body: JSON.stringify(body)
     });
     const r = await resp.json();
     if (!resp.ok) { log('预览失败：' + JSON.stringify(r)); return; }
@@ -445,6 +499,7 @@ async function previewTransfer() {
     previewTotal = r.total;
     previewSourceTotal = r.source_total;
     previewFilteredTotal = r.filtered_total;
+    previewHasSchema = !!r.has_schema;
     excludedIds = new Set();
     page = 0;
 
@@ -491,6 +546,7 @@ function renderPreviewTable() {
   const slice = previewRows.slice(start, start + PAGE_SIZE);
   let html = '<div class="preview-scroll"><table><tr><th class="checkbox-cell">'
     + '<input type="checkbox" id="chkAll" onchange="onPageAll(this)" checked></th><th>#</th>';
+  if (previewHasSchema) html += '<th>来源</th>';
   previewColumns.forEach(c => { html += '<th>' + jdyLabel(c) + '</th>'; });
   html += '</tr>';
 
@@ -500,6 +556,7 @@ function renderPreviewTable() {
     html += '<tr><td class="checkbox-cell"><input type="checkbox" data-id="' + rid + '" '
       + (checked ? 'checked' : '') + ' onchange="onRowToggle(this)"></td>'
       + '<td>' + (start + idx + 1) + '</td>';
+    if (previewHasSchema) html += '<td>' + (row._schema || '') + '</td>';
     previewColumns.forEach(c => {
       const v = row[c] === undefined || row[c] === null ? '' : String(row[c]);
       html += '<td title="' + v.replace(/"/g, '&quot;') + '">' + v + '</td>';
@@ -520,7 +577,7 @@ function renderPager() {
 }
 
 function onRowToggle(el) {
-  const id = parseInt(el.getAttribute('data-id'));
+  const id = el.getAttribute('data-id');
   if (el.checked) excludedIds.delete(id); else excludedIds.add(id);
   updateCountDisplay();
 }
@@ -578,18 +635,23 @@ async function confirmTransfer() {
   log('开始传输…');
 
   try {
+    const body = {
+      source: currentSourceId,
+      database: db, table: table,
+      source_fields: sourceFields, target_fields: targetFields,
+      platform_value: platform, limit: limit,
+      time_field: timeField,
+      date_from: date_from, date_to: date_to,
+      excluded_ids: [...excludedIds]
+    };
+    if (currentIsMerge && currentSourceSchemas.length > 1) {
+      body.database = currentSourceSchemas[0];
+      body.schemas = currentSourceSchemas;
+    }
     const resp = await fetch('/api/transfer', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        source: currentSourceId,
-        database: db, table: table,
-        source_fields: sourceFields, target_fields: targetFields,
-        platform_value: platform, limit: limit,
-        time_field: timeField,
-        date_from: date_from, date_to: date_to,
-        excluded_ids: [...excludedIds]
-      })
+      body: JSON.stringify(body)
     });
     const r = await resp.json();
     $('progressBar').style.width = '100%';

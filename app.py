@@ -104,6 +104,16 @@ def get_source(source_id):
     return SOURCES[source_id]
 
 
+def source_type(source_id):
+    s = get_source(source_id)
+    t = s.get('type', 'mysql')
+    return t if t in ('mysql', 'oracle') else 'mysql'
+
+
+def is_oracle(source_id):
+    return source_type(source_id) == 'oracle'
+
+
 def get_password(source_id):
     """优先取 config.json 里的 password（向后兼容），否则取环境变量"""
     s = get_source(source_id)
@@ -116,11 +126,37 @@ def get_password(source_id):
     return pwd
 
 
+_oracle_client_initialized = False
+
+
 def get_conn(source_id):
     s = get_source(source_id)
+    if s.get('type') == 'oracle':
+        return get_oracle_conn(source_id, s)
     return pymysql.connect(host=s['host'], port=int(s.get('port', 3306)),
                            user=s['user'], password=get_password(source_id),
                            charset=s.get('charset', 'utf8mb4'))
+
+
+def get_oracle_conn(source_id, s):
+    """Oracle 连接（thick 模式，需 Instant Client）"""
+    global _oracle_client_initialized
+    try:
+        import oracledb
+    except ImportError:
+        raise HTTPException(500, '未安装 oracledb，请执行 pip install oracledb')
+    if not _oracle_client_initialized:
+        lib_dir = s.get('instant_client', '')
+        if lib_dir and os.path.isdir(lib_dir):
+            oracledb.init_oracle_client(lib_dir=lib_dir)
+        else:
+            oracledb.init_oracle_client()
+        _oracle_client_initialized = True
+    host = s['host']
+    port = int(s.get('port', 1521))
+    service = s.get('service', '')
+    dsn = oracledb.makedsn(host, port, service_name=service) if service else oracledb.makedsn(host, port)
+    return oracledb.connect(user=s['user'], password=get_password(source_id), dsn=dsn)
 
 
 def safe_ident(name):
@@ -130,13 +166,26 @@ def safe_ident(name):
     return '`' + name + '`'
 
 
+def oracle_ident(name):
+    """Oracle 标识符：校验后用双引号包裹（保留大写）"""
+    if not re.match(r'^[A-Za-z0-9_\-]+$', name or ''):
+        raise HTTPException(400, '非法标识符: %s' % name)
+    return '"' + name.upper() + '"'
+
+
 def get_primary_key(source_id, database, table):
     conn = get_conn(source_id)
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                    "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_KEY='PRI'",
-                    (database, table))
+        if is_oracle(source_id):
+            cur.execute("SELECT cc.column_name FROM all_constraints c, all_cons_columns cc "
+                        "WHERE c.owner = cc.owner AND c.constraint_name = cc.constraint_name "
+                        "AND c.constraint_type = 'P' AND c.owner = :1 AND c.table_name = :2",
+                        (database.upper(), table.upper()))
+        else:
+            cur.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_KEY='PRI'",
+                        (database, table))
         r = cur.fetchone()
         return r[0] if r else 'id'
     finally:
@@ -155,7 +204,8 @@ class TransferRequest(BaseModel):
     time_field: Optional[str] = ''    # 时间字段（筛选 + 平台数据创建时间来源）
     date_from: Optional[str] = ''     # 如 2025 / 2025-06 / 2025-06-01
     date_to: Optional[str] = ''
-    excluded_ids: Optional[List[int]] = None  # 取消勾选（不传输）的主键 id 列表
+    excluded_ids: Optional[List[str]] = None  # 取消勾选（不传输）的行标识列表
+    schemas: Optional[List[str]] = None       # Oracle 多 schema 合并（如 ['BFEC','SHFEC','GZFEC']）
 
 
 # ---------- 时间范围 ----------
@@ -187,19 +237,27 @@ def _range_end(s):
     return start + datetime.timedelta(days=1)
 
 
-def build_time_where(time_field, date_from, date_to):
+def build_time_where(time_field, date_from, date_to, oracle=False):
     """返回 (where_clause, params)，未填则返回 ('', [])"""
     if not time_field:
         return '', []
-    f = safe_ident(time_field)
+    f = oracle_ident(time_field) if oracle else safe_ident(time_field)
     parts = []
     params = []
     if date_from:
-        parts.append(f + ' >= %s')
-        params.append(_parse_start(date_from).strftime('%Y-%m-%d %H:%M:%S'))
+        if oracle:
+            # Oracle 年份数字字段：>= 起始年
+            parts.append(f + ' >= ' + str(int(_parse_start(date_from).year)))
+        else:
+            parts.append(f + ' >= %s')
+            params.append(_parse_start(date_from).strftime('%Y-%m-%d %H:%M:%S'))
     if date_to:
-        parts.append(f + ' < %s')
-        params.append(_range_end(date_to).strftime('%Y-%m-%d %H:%M:%S'))
+        if oracle:
+            # Oracle：<= 结束年（含当年）
+            parts.append(f + ' <= ' + str(int(_parse_start(date_to).year)))
+        else:
+            parts.append(f + ' < %s')
+            params.append(_range_end(date_to).strftime('%Y-%m-%d %H:%M:%S'))
     if parts:
         return ' WHERE ' + ' AND '.join(parts), params
     return '', []
@@ -241,7 +299,9 @@ def __json(obj):
 @app.get('/api/sources')
 def list_sources():
     """返回数据源列表（不含密码）"""
-    return {'sources': [{'id': s['id'], 'name': s.get('name', s['id'])}
+    return {'sources': [{'id': s['id'], 'name': s.get('name', s['id']),
+                         'type': s.get('type', 'mysql'),
+                         'schemas': s.get('schemas', [])}
                         for s in SOURCES.values()]}
 
 
@@ -250,6 +310,12 @@ def list_databases(source: str):
     conn = get_conn(source)
     try:
         cur = conn.cursor()
+        if is_oracle(source):
+            # Oracle 列出可访问的 schema（表所在的 owner）
+            cur.execute("SELECT DISTINCT owner FROM all_tables "
+                        "WHERE owner NOT IN ('SYS','SYSTEM','XDB','MDSYS','CTXSYS','OLAPSYS','ORDSYS','OUTLN','DBSNMP','WMSYS','EXFSYS','SYSMAN','MGMT_VIEW') "
+                        "ORDER BY owner")
+            return {'databases': [r[0] for r in cur.fetchall()]}
         cur.execute('SHOW DATABASES')
         return {'databases': [r[0] for r in cur.fetchall()]}
     finally:
@@ -261,7 +327,11 @@ def list_tables(source: str, database: str):
     conn = get_conn(source)
     try:
         cur = conn.cursor()
-        cur.execute('SHOW TABLES FROM %s' % safe_ident(database))
+        if is_oracle(source):
+            cur.execute("SELECT table_name FROM all_tables WHERE owner = :1 ORDER BY table_name",
+                        (database.upper(),))
+        else:
+            cur.execute('SHOW TABLES FROM %s' % safe_ident(database))
         return {'tables': [r[0] for r in cur.fetchall()]}
     finally:
         conn.close()
@@ -272,6 +342,15 @@ def list_columns(source: str, database: str, table: str):
     conn = get_conn(source)
     try:
         cur = conn.cursor()
+        if is_oracle(source):
+            cur.execute("SELECT a.column_name, a.data_type, "
+                        "COALESCE(c.comments, '') AS comments "
+                        "FROM all_tab_columns a "
+                        "LEFT JOIN all_col_comments c ON c.owner = a.owner AND c.table_name = a.table_name AND c.column_name = a.column_name "
+                        "WHERE a.owner = :1 AND a.table_name = :2 ORDER BY a.column_id",
+                        (database.upper(), table.upper()))
+            cols = [{'name': r[0], 'type': r[1], 'comment': r[2] or ''} for r in cur.fetchall()]
+            return {'columns': cols, 'primary_key': get_primary_key(source, database, table)}
         cur.execute('SHOW FULL COLUMNS FROM %s.%s' % (safe_ident(database), safe_ident(table)))
         cols = [{'name': r[0], 'type': r[1], 'comment': r[8] or ''} for r in cur.fetchall()]
         return {'columns': cols, 'primary_key': get_primary_key(source, database, table)}
@@ -284,7 +363,11 @@ def preview(source: str, database: str, table: str, limit: int = 5):
     conn = get_conn(source)
     try:
         cur = conn.cursor()
-        cur.execute('SELECT * FROM %s.%s LIMIT %d' % (safe_ident(database), safe_ident(table), limit))
+        if is_oracle(source):
+            cur.execute('SELECT * FROM %s.%s WHERE ROWNUM <= %d' % (
+                oracle_ident(database), oracle_ident(table), limit))
+        else:
+            cur.execute('SELECT * FROM %s.%s LIMIT %d' % (safe_ident(database), safe_ident(table), limit))
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         return {'columns': cols, 'rows': [list(r) for r in rows]}
@@ -334,36 +417,116 @@ def jdy_preview(limit: int = 20):
 
 
 def _read_rows(req, exclude=False):
-    """按请求读源表数据，返回 (fields, time_field, rows)。
-    主键字段始终加入 fields 列表（用于行标识/排除）。"""
+    """按请求读源表数据，返回 (fields, time_field, rows, has_schema)。
+    支持 Oracle 多 schema 合并（每行首列为 schema）。"""
+    oracle = is_oracle(req.source)
+    schemas = req.schemas if (oracle and req.schemas) else None
     pk = get_primary_key(req.source, req.database, req.table)
+
     fields = list(req.source_fields)
     time_field = req.time_field or ''
     if time_field and time_field not in fields:
         fields.append(time_field)
-    if pk not in fields:
+    if pk and pk not in fields:
         fields.append(pk)
 
-    where, params = build_time_where(time_field, req.date_from, req.date_to)
-
-    if exclude and req.excluded_ids:
-        placeholders = ','.join(['%s'] * len(req.excluded_ids))
-        where += (' AND ' if where else ' WHERE ') + safe_ident(pk) + ' NOT IN (' + placeholders + ')'
-        params += list(req.excluded_ids)
-
-    sql = 'SELECT %s FROM %s.%s' % (
-        ','.join(safe_ident(f) for f in fields),
-        safe_ident(req.database), safe_ident(req.table)) + where
-    if req.limit and req.limit > 0:
-        sql += ' LIMIT %d' % req.limit
+    where, params = build_time_where(time_field, req.date_from, req.date_to, oracle=oracle)
+    ident = oracle_ident if oracle else safe_ident
 
     conn = get_conn(req.source)
     try:
         cur = conn.cursor()
-        cur.execute(sql, params)
-        return fields, time_field, cur.fetchall()
+        rows = []
+        if schemas:
+            # Oracle 多 schema 合并
+            for sch in schemas:
+                sch_u = sch.upper()
+                w2, p2 = where, list(params)
+                if exclude and req.excluded_ids:
+                    excl = [x.split(':', 1)[1] for x in req.excluded_ids if x.startswith(sch_u + ':')]
+                    if excl:
+                        ph = ','.join([':%d' % (len(p2) + i + 1) for i in range(len(excl))])
+                        w2 += (' AND ' if w2 else ' WHERE ') + ident(pk) + ' NOT IN (' + ph + ')'
+                        p2 += [int(x) if str(x).isdigit() else x for x in excl]
+                sql = 'SELECT %s FROM %s.%s%s' % (
+                    ','.join(ident(f) for f in fields), ident(sch_u), ident(req.table), w2)
+                if req.limit and req.limit > 0:
+                    sql = 'SELECT * FROM (%s) WHERE ROWNUM <= %d' % (sql, req.limit)
+                cur.execute(sql, p2)
+                for r in cur.fetchall():
+                    rows.append((sch_u,) + tuple(r))
+            fields = ['_schema'] + fields
+        else:
+            w2, p2 = where, list(params)
+            if exclude and req.excluded_ids:
+                excl = [x.split(':', 1)[-1] for x in req.excluded_ids]
+                if excl:
+                    ph = ','.join(['%s'] * len(excl)) if not oracle else \
+                        ','.join([':%d' % (len(p2) + i + 1) for i in range(len(excl))])
+                    w2 += (' AND ' if w2 else ' WHERE ') + ident(pk) + ' NOT IN (' + ph + ')'
+                    p2 += [int(x) if str(x).isdigit() else x for x in excl]
+            sql = 'SELECT %s FROM %s.%s%s' % (
+                ','.join(ident(f) for f in fields), ident(req.database), ident(req.table), w2)
+            if req.limit and req.limit > 0:
+                if oracle:
+                    sql = 'SELECT * FROM (%s) WHERE ROWNUM <= %d' % (sql, req.limit)
+                else:
+                    sql += ' LIMIT %d' % req.limit
+            cur.execute(sql, p2)
+            rows = cur.fetchall()
+        return fields, time_field, rows, bool(schemas)
     finally:
         conn.close()
+
+
+def _count_rows(req):
+    """返回 (source_total, filtered_total)，支持 Oracle 多 schema"""
+    oracle = is_oracle(req.source)
+    schemas = req.schemas if (oracle and req.schemas) else None
+    ident = oracle_ident if oracle else safe_ident
+    where, params = build_time_where(req.time_field, req.date_from, req.date_to, oracle=oracle)
+
+    conn = get_conn(req.source)
+    try:
+        cur = conn.cursor()
+        def count(w, p):
+            sql = 'SELECT COUNT(*) FROM %s.%s%s' % (ident(req.database), ident(req.table), w)
+            cur.execute(sql, p)
+            return cur.fetchone()[0]
+
+        source_total = 0
+        filtered_total = 0
+        if schemas:
+            for sch in schemas:
+                sch_u = sch.upper()
+                def cnt_for_schema(w):
+                    sql = 'SELECT COUNT(*) FROM %s.%s%s' % (ident(sch_u), ident(req.table), w)
+                    cur.execute(sql, list(params))
+                    return cur.fetchone()[0]
+                source_total += cnt_for_schema('')
+                filtered_total += cnt_for_schema(where)
+        else:
+            source_total = count('', [])
+            filtered_total = count(where, params)
+        return source_total, filtered_total
+    finally:
+        conn.close()
+
+
+def _row_id(pk, row, fields, has_schema):
+    """生成行唯一标识：多 schema 时为 'SCHEMA:pk'，否则 pk 值"""
+    col_index = {name: idx for idx, name in enumerate(fields)}
+    pkv = row[col_index[pk]]
+    if has_schema:
+        return '%s:%s' % (row[col_index['_schema']], pkv)
+    return str(pkv)
+
+
+def _time_value(val):
+    """Oracle 数字年份 -> datetime(1月1日)，供时间字段转换"""
+    if isinstance(val, (int, float)) and 1000 <= val <= 9999:
+        return datetime.datetime(int(val), 1, 1)
+    return val
 
 
 @app.post('/api/transfer/preview')
@@ -374,31 +537,11 @@ def transfer_preview(req: TransferRequest):
     if len(req.source_fields) != len(req.target_fields):
         raise HTTPException(400, '映射字段数量不匹配')
 
-    # 源表总数（无筛选）
-    conn = get_conn(req.source)
-    try:
-        cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM %s.%s' % (safe_ident(req.database), safe_ident(req.table)))
-        source_total = cur.fetchone()[0]
-    finally:
-        conn.close()
-
-    # 应用时间筛选后的总数（无 limit）
-    where, params = build_time_where(req.time_field, req.date_from, req.date_to)
-    conn = get_conn(req.source)
-    try:
-        cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM %s.%s%s' % (
-            safe_ident(req.database), safe_ident(req.table), where), params)
-        filtered_total = cur.fetchone()[0]
-    finally:
-        conn.close()
-
     pk = get_primary_key(req.source, req.database, req.table)
-    fields, time_field, rows = _read_rows(req, exclude=False)
+    source_total, filtered_total = _count_rows(req)
+    fields, time_field, rows, has_schema = _read_rows(req, exclude=False)
     total = len(rows)
 
-    # 构建列（简道云字段 key，顺序）和每行数据
     columns = list(req.target_fields)
     if time_field and JDY_TIME_KEY not in columns:
         columns.append(JDY_TIME_KEY)
@@ -406,11 +549,13 @@ def transfer_preview(req: TransferRequest):
     col_index = {name: idx for idx, name in enumerate(fields)}
     out_rows = []
     for row in rows:
-        obj = {'_row_id': row[col_index[pk]]}
+        obj = {'_row_id': _row_id(pk, row, fields, has_schema)}
+        if has_schema:
+            obj['_schema'] = row[col_index['_schema']]
         for j, src in enumerate(req.source_fields):
             obj[req.target_fields[j]] = to_display(row[col_index[src]])
         if time_field:
-            obj[JDY_TIME_KEY] = to_display(row[col_index[time_field]])
+            obj[JDY_TIME_KEY] = to_display(_time_value(row[col_index[time_field]]))
         if req.platform_value and JDY_PLATFORM_KEY in req.target_fields:
             obj[JDY_PLATFORM_KEY] = req.platform_value
         out_rows.append(obj)
@@ -421,6 +566,7 @@ def transfer_preview(req: TransferRequest):
         'total': total,
         'columns': columns,
         'rows': out_rows,
+        'has_schema': has_schema,
     }
 
 
@@ -432,8 +578,7 @@ def transfer(req: TransferRequest):
     if len(req.source_fields) != len(req.target_fields):
         raise HTTPException(400, '映射字段数量不匹配')
 
-    pk = get_primary_key(req.source, req.database, req.table)
-    fields, time_field, rows = _read_rows(req, exclude=True)
+    fields, time_field, rows, has_schema = _read_rows(req, exclude=True)
 
     total = len(rows)
     if total == 0:
@@ -453,7 +598,7 @@ def transfer(req: TransferRequest):
             for j in range(n_fields):
                 rec[req.target_fields[j]] = normalize_value(row[col_index[req.source_fields[j]]])
             if time_field:
-                rec[JDY_TIME_KEY] = normalize_value(row[col_index[time_field]])
+                rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
             if req.platform_value and JDY_PLATFORM_KEY in req.target_fields:
                 rec[JDY_PLATFORM_KEY] = {'value': req.platform_value}
             data_list.append(rec)
