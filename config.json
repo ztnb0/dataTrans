@@ -1,0 +1,13 @@
+{
+  "sources": [
+    {
+      "id": "dpt-182",
+      "name": "主库 192.168.2.182",
+      "host": "192.168.2.182",
+      "port": 3306,
+      "user": "dpt_dev",
+      "password": "dev20161111",
+      "charset": "gbk"
+    }
+  ]
+}

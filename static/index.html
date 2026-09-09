@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据迁移工具</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f4f6f9; color: #333; }
+header { background: #2b6cb0; color: #fff; padding: 14px 24px; font-size: 18px; font-weight: 600; }
+.wrap { display: flex; gap: 16px; padding: 16px 24px; align-items: stretch; }
+.panel { background: #fff; border-radius: 8px; padding: 16px; flex: 1; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.panel h2 { font-size: 15px; margin-bottom: 12px; color: #2b6cb0; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+select, input[type=text], input[type=number], input[type=date], input[type=month] { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+.field-list { border: 1px solid #e2e8f0; border-radius: 4px; max-height: 300px; overflow-y: auto; }
+.field-item { display: flex; align-items: center; padding: 6px 10px; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+.field-item:last-child { border-bottom: none; }
+.field-item input[type=checkbox] { margin-right: 8px; }
+.field-item .fname { font-weight: 600; }
+.field-item .fmeta { color: #999; font-size: 11px; margin-left: 8px; }
+.center { flex: 0 0 280px; display: flex; flex-direction: column; gap: 12px; }
+.center .panel { flex: none; }
+.mapping { font-size: 12px; }
+.map-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.map-row select { margin-bottom: 0; flex: 1; }
+.map-row .arrow { color: #2b6cb0; flex: 0 0 auto; }
+.btn { background: #2b6cb0; color: #fff; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.btn:hover { background: #2c5282; }
+.btn.gray { background: #718096; }
+.btn.green { background: #2f855a; }
+.btn.green:hover { background: #276749; }
+.btn.red { background: #c53030; }
+.btn:disabled { background: #a0aec0; cursor: not-allowed; }
+.log { background: #1a202c; color: #a0aec0; padding: 12px; border-radius: 6px; font-size: 12px; min-height: 100px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; }
+.progress { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; margin-top: 8px; display: none; }
+.progress .bar { height: 100%; background: #48bb78; width: 0; transition: width .3s; }
+.preview table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.preview th, .preview td { border: 1px solid #e2e8f0; padding: 4px 8px; text-align: left; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview th { background: #f7fafc; }
+.hint { font-size: 12px; color: #888; margin-bottom: 8px; line-height: 1.5; }
+.summary { font-size: 13px; padding: 8px 10px; background: #ebf8ff; border-radius: 4px; margin-bottom: 10px; line-height: 1.7; }
+.summary b { color: #2b6cb0; }
+.pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; }
+.pager button { padding: 4px 12px; border: 1px solid #ccc; background: #fff; border-radius: 4px; cursor: pointer; }
+.pager button:disabled { color: #ccc; cursor: not-allowed; }
+.two-col { display: flex; gap: 8px; }
+.two-col > div { flex: 1; }
+.preview-scroll { max-height: 480px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 4px; }
+.preview-scroll table { width: 100%; }
+.preview-scroll th { position: sticky; top: 0; }
+.checkbox-cell { width: 30px; text-align: center; }
+.search-box { position: relative; }
+.search-box input { margin-bottom: 0; }
+.search-drop { display: none; position: absolute; left: 0; right: 0; top: 100%; max-height: 240px; overflow-y: auto; background: #fff; border: 1px solid #ccc; border-radius: 4px; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.search-drop .opt { padding: 7px 10px; font-size: 13px; cursor: pointer; }
+.search-drop .opt:hover { background: #ebf4ff; }
+.search-drop .opt.hl { background: #2b6cb0; color: #fff; }
+.search-drop .empty { padding: 7px 10px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<header>数据迁移工具 — 后台数据库 → 简道云</header>
+<div class="wrap">
+  <!-- 左栏：数据库 -->
+  <div class="panel">
+    <h2>① 后台数据库（左）</h2>
+    <label>数据源</label>
+    <div class="search-box">
+      <input type="text" id="source" placeholder="搜索或选择数据源…" autocomplete="off" oninput="filterSource()" onfocus="filterSource()">
+      <div class="search-drop" id="sourceDrop"></div>
+    </div>
+    <label>数据库</label>
+    <div class="search-box">
+      <input type="text" id="db" placeholder="搜索或选择数据库…" autocomplete="off" oninput="filterDb()" onfocus="filterDb()">
+      <div class="search-drop" id="dbDrop"></div>
+    </div>
+    <label>表</label>
+    <div class="search-box">
+      <input type="text" id="table" placeholder="搜索或选择表…" autocomplete="off" oninput="filterTable()" onfocus="filterTable()">
+      <div class="search-drop" id="tableDrop"></div>
+    </div>
+    <label>选择要传输的字段（勾选）</label>
+    <div class="field-list" id="dbFields"></div>
+
+    <div style="margin-top:12px;">
+      <button class="btn gray" onclick="previewData()">预览源数据</button>
+    </div>
+  </div>
+
+  <!-- 中栏：映射 + 操作 -->
+  <div class="center">
+    <div class="panel">
+      <h2>② 字段映射</h2>
+      <div class="hint">左侧勾选的字段自动与简道云字段配对，可手动调整右侧对应字段。</div>
+      <div id="mappingList" class="mapping"></div>
+      <div id="timeFilterBox" style="display:none;margin-top:12px;border-top:1px solid #eee;padding-top:10px;">
+        <div class="hint" style="margin-bottom:6px;">时间字段 <b id="timeFieldName"></b>：作为筛选条件，并作为“平台数据创建时间”的来源。</div>
+        <label>起始时间（不选日=按月初，不选月=按年初）</label>
+        <div id="dateFromRow"></div>
+        <label>结束时间（不选日=按月末，不选月=按年末）</label>
+        <div id="dateToRow"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>③ 平台 & 传输</h2>
+      <label>“平台”字段固定值（手写）</label>
+      <input type="text" id="platformValue" placeholder="如：金库网班级">
+      <label>限制条数（0 = 全部）</label>
+      <input type="number" id="limitNum" value="0" min="0">
+      <button class="btn green" id="btnTransfer" onclick="previewTransfer()">开始传输（先预览）</button>
+      <div class="progress" id="progress"><div class="bar" id="progressBar"></div></div>
+      <div class="log" id="log">就绪</div>
+    </div>
+  </div>
+
+  <!-- 右栏：简道云 -->
+  <div class="panel">
+    <h2>④ 简道云表单（右）</h2>
+    <div class="hint">应用 <b id="jdyAppId"></b></div>
+    <div class="field-list" id="jdyFields" style="max-height:160px;"></div>
+    <div style="margin-top:10px;">
+      <button class="btn gray" onclick="loadJdyFields()">刷新字段</button>
+      <button class="btn gray" onclick="viewJdyData()">查看表单已有数据</button>
+    </div>
+    <div id="jdyResult" style="margin-top:14px;"></div>
+  </div>
+</div>
+
+<div class="panel" style="margin:0 24px 24px;">
+  <h2>源数据预览</h2>
+  <div class="preview" id="previewBox"><div class="hint">点击“预览源数据”查看源表前 5 条。</div></div>
+</div>
+
+<script>
+let jdyWidgets = [];
+let dbColumns = [];
+let primaryKey = 'id';
+
+// 传输预览状态
+let previewRows = [];      // 预览行数据（含 _row_id）
+let previewColumns = [];   // 简道云字段 key
+let previewTotal = 0;
+let previewSourceTotal = 0;
+let previewFilteredTotal = 0;
+let excludedIds = new Set(); // 取消勾选的 _row_id
+let page = 0;
+const PAGE_SIZE = 50;
+let currentTimeField = '';  // 当前勾选中的时间字段名
+
+const $ = id => document.getElementById(id);
+
+async function init() {
+  await loadSources();
+  await loadJdyFields();
+  $('jdyAppId').textContent = '598d1c563788a36bcba8a193 / 6aa0bbef65115c860c3a7bfd';
+}
+
+let currentSourceId = '';
+
+async function loadSources() {
+  const r = await fetch('/api/sources').then(x => x.json());
+  sourceList = r.sources;
+  if (sourceList.length > 0) {
+    $('source').value = sourceList[0].name;
+    currentSourceId = sourceList[0].id;
+  }
+  renderSourceDrop();
+  await loadDatabases();
+}
+
+function filterSource() { renderSourceDrop(); }
+
+function renderSourceDrop() {
+  const dd = $('sourceDrop');
+  const kw = $('source').value.toLowerCase();
+  const filtered = sourceList.filter(s => s.name.toLowerCase().includes(kw));
+  if (filtered.length === 0) {
+    dd.innerHTML = '<div class="empty">无匹配</div>';
+  } else {
+    dd.innerHTML = filtered.map(s =>
+      '<div class="opt" data-id="' + s.id + '" data-name="' + s.name + '">' + s.name + '</div>').join('');
+  }
+  dd.style.display = 'block';
+  dd.querySelectorAll('.opt').forEach(o => {
+    o.onclick = () => {
+      $('source').value = o.getAttribute('data-name');
+      currentSourceId = o.getAttribute('data-id');
+      dd.style.display = 'none';
+      loadDatabases();
+    };
+  });
+}
+
+async function loadDatabases() {
+  if (!currentSourceId) { dbList = []; $('db').value = ''; renderDrop('db', dbList, onPickDb); return; }
+  const r = await fetch('/api/databases?source=' + encodeURIComponent(currentSourceId)).then(x => x.json());
+  dbList = r.databases;
+  if (dbList.includes('dpt_product')) $('db').value = 'dpt_product';
+  else $('db').value = '';
+  renderDrop('db', dbList, onPickDb);
+  await loadTables();
+}
+
+async function loadTables() {
+  const db = $('db').value.trim();
+  if (!db) { tableList = []; $('table').value = ''; renderDrop('table', tableList, onPickTable); return; }
+  const r = await fetch('/api/tables?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db)).then(x => x.json());
+  tableList = r.tables;
+  if (tableList.includes('coaching_class')) $('table').value = 'coaching_class';
+  else $('table').value = '';
+  renderDrop('table', tableList, onPickTable);
+  await loadColumns();
+}
+
+async function loadColumns() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  if (!db || !table) { dbColumns = []; $('dbFields').innerHTML = ''; currentTimeField = ''; updateTimeFilterUI(); return; }
+  const r = await fetch('/api/columns?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db) + '&table=' + encodeURIComponent(table)).then(x => x.json());
+  dbColumns = r.columns;
+  primaryKey = r.primary_key || 'id';
+  const box = $('dbFields');
+  box.innerHTML = '';
+  r.columns.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'field-item';
+    div.innerHTML = '<input type="checkbox" value="' + c.name + '" onchange="rebuildMapping()">'
+      + '<span class="fname">' + c.name + '</span>'
+      + '<span class="fmeta">' + c.type + (c.comment ? ' · ' + c.comment : '') + '</span>';
+    box.appendChild(div);
+  });
+  currentTimeField = '';
+  updateTimeFilterUI();
+}
+
+// ---------- 可搜索下拉 ----------
+let sourceList = [];
+let dbList = [];
+let tableList = [];
+
+function renderDrop(id, items, onPick) {
+  const el = $(id);
+  const key = id === 'db' ? 'dbDrop' : 'tableDrop';
+  const dd = $(key);
+  const kw = el.value.toLowerCase();
+  const filtered = items.filter(x => x.toLowerCase().includes(kw));
+  if (filtered.length === 0) {
+    dd.innerHTML = '<div class="empty">无匹配</div>';
+  } else {
+    dd.innerHTML = filtered.map(x => '<div class="opt" data-v="' + x + '">' + x + '</div>').join('');
+  }
+  dd.style.display = 'block';
+  dd.querySelectorAll('.opt').forEach(o => {
+    o.onclick = () => { onPick(o.getAttribute('data-v')); dd.style.display = 'none'; };
+  });
+}
+
+function filterDb() { renderDrop('db', dbList, onPickDb); }
+function filterTable() { renderDrop('table', tableList, onPickTable); }
+
+function onPickDb(v) {
+  $('db').value = v;
+  $('dbDrop').style.display = 'none';
+  loadTables();
+}
+function onPickTable(v) {
+  $('table').value = v;
+  $('tableDrop').style.display = 'none';
+  loadColumns();
+}
+
+// 点击输入框外部时收起下拉
+document.addEventListener('click', function (e) {
+  if (!e.target.closest('.search-box')) {
+    document.querySelectorAll('.search-drop').forEach(d => d.style.display = 'none');
+  }
+});
+
+function getSelectedDbFields() {
+  return [...document.querySelectorAll('#dbFields input:checked')].map(i => i.value);
+}
+
+// 判断字段是否为时间类型
+function isTimeField(name) {
+  const c = dbColumns.find(x => x.name === name);
+  return c ? /date|time/i.test(c.type) : false;
+}
+
+// 生成年月日三级下拉；prefix='to' 时默认选中今天
+function buildDatePicker(prefix) {
+  const now = new Date();
+  const today = { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
+  const isTo = prefix === 'to';
+  let html = '<div class="two-col">';
+  html += '<div><select id="' + prefix + '_y" onchange="onDateChange(\'' + prefix + '\')"><option value="">年</option>';
+  for (let y = now.getFullYear() + 1; y >= 1990; y--) {
+    const sel = isTo && y === today.y ? ' selected' : '';
+    html += '<option value="' + y + '"' + sel + '>' + y + '</option>';
+  }
+  html += '</select></div>';
+  html += '<div><select id="' + prefix + '_m" onchange="onDateChange(\'' + prefix + '\')"><option value="">月</option>';
+  for (let m = 1; m <= 12; m++) {
+    const sel = isTo && m === today.m ? ' selected' : '';
+    html += '<option value="' + m + '"' + sel + '>' + m + '月</option>';
+  }
+  html += '</select></div>';
+  html += '<div><select id="' + prefix + '_d"><option value="">日</option>';
+  for (let d = 1; d <= 31; d++) {
+    const sel = isTo && d === today.d ? ' selected' : '';
+    html += '<option value="' + d + '"' + sel + '>' + d + '日</option>';
+  }
+  html += '</select></div></div>';
+  return html;
+}
+
+// 显示/隐藏时间筛选区（勾选了时间字段才显示）
+function updateTimeFilterUI() {
+  const selected = getSelectedDbFields();
+  currentTimeField = selected.find(isTimeField) || '';
+  const box = $('timeFilterBox');
+  if (!currentTimeField) {
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'block';
+  $('timeFieldName').textContent = currentTimeField;
+  if (!$('dateFromRow').innerHTML) {
+    $('dateFromRow').innerHTML = buildDatePicker('from');
+    $('dateToRow').innerHTML = buildDatePicker('to');
+  }
+}
+
+function onDateChange(prefix) {
+  // 日/月下拉不选即代表精确到月/年，无需额外处理
+}
+
+async function loadJdyFields() {
+  const r = await fetch('/api/jdy/fields').then(x => x.json());
+  jdyWidgets = r.widgets;
+  const box = $('jdyFields');
+  box.innerHTML = '';
+  r.widgets.forEach(w => {
+    const div = document.createElement('div');
+    div.className = 'field-item';
+    div.innerHTML = '<span class="fname">' + w.label + '</span>'
+      + '<span class="fmeta">' + w.type + '</span>';
+    box.appendChild(div);
+  });
+  rebuildMapping();
+}
+
+// 智能默认映射：按字段名/类型猜测
+function guessTarget(src) {
+  const s = src.toLowerCase();
+  if (isTimeField(src)) return '_widget_1788918827862';                 // 平台数据创建时间
+  if (s.includes('number') || s.includes('code')) return '_widget_1788918827860'; // 项目编号
+  if (s.includes('name')) return '_widget_1788918827861';                         // 项目名称
+  return jdyWidgets.length ? jdyWidgets[0].name : '';
+}
+
+function rebuildMapping() {
+  const selected = getSelectedDbFields();
+  const box = $('mappingList');
+  box.innerHTML = '';
+  selected.forEach(src => {
+    const row = document.createElement('div');
+    row.className = 'map-row';
+    const opts = jdyWidgets.map(w =>
+      '<option value="' + w.name + '">' + w.label + '</option>').join('');
+    row.innerHTML = '<span style="flex:1;">' + src + '</span>'
+      + '<span class="arrow">→</span>'
+      + '<select>' + opts + '</select>';
+    const sel = row.querySelector('select');
+    const g = guessTarget(src);
+    if (g) sel.value = g;
+    box.appendChild(row);
+  });
+  if (selected.length === 0) box.innerHTML = '<span style="color:#999;">请先在左侧勾选字段。</span>';
+  updateTimeFilterUI();
+}
+
+// 读取起止日期，返回 {date_from, date_to}（不选日=到月，不选月=到年）
+function getDateRange() {
+  function read(prefix) {
+    const y = $(prefix + '_y') ? $(prefix + '_y').value : '';
+    const m = $(prefix + '_m') ? $(prefix + '_m').value : '';
+    const d = $(prefix + '_d') ? $(prefix + '_d').value : '';
+    if (!y) return '';
+    if (!m) return y;
+    const mm = String(m).padStart(2, '0');
+    if (!d) return y + '-' + mm;
+    return y + '-' + mm + '-' + String(d).padStart(2, '0');
+  }
+  return { date_from: read('from'), date_to: read('to') };
+}
+
+async function previewData() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  const r = await fetch('/api/preview?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db) + '&table=' + encodeURIComponent(table) + '&limit=5').then(x => x.json());
+  const box = $('previewBox');
+  let html = '<table><tr>' + r.columns.map(c => '<th>' + c + '</th>').join('') + '</tr>';
+  r.rows.forEach(row => {
+    html += '<tr>' + row.map(v => '<td>' + (v === null ? '' : String(v)) + '</td>').join('') + '</tr>';
+  });
+  html += '</table>';
+  box.innerHTML = html;
+}
+
+// 传输前预览
+async function previewTransfer() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  const selected = getSelectedDbFields();
+  const rows = [...document.querySelectorAll('#mappingList .map-row')];
+  const targetFields = rows.map(r => r.querySelector('select').value);
+  const sourceFields = selected;
+
+  if (selected.length === 0) { alert('请先在左侧勾选要传输的字段'); return; }
+
+  const platform = $('platformValue').value.trim();
+  const limit = parseInt($('limitNum').value) || 0;
+  const timeField = currentTimeField;
+  const { date_from, date_to } = getDateRange();
+
+  $('btnTransfer').disabled = true;
+  log('正在生成预览…');
+
+  try {
+    const resp = await fetch('/api/transfer/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        source: currentSourceId,
+        database: db, table: table,
+        source_fields: sourceFields, target_fields: targetFields,
+        platform_value: platform, limit: limit,
+        time_field: timeField,
+        date_from: date_from, date_to: date_to
+      })
+    });
+    const r = await resp.json();
+    if (!resp.ok) { log('预览失败：' + JSON.stringify(r)); return; }
+
+    previewRows = r.rows;
+    previewColumns = r.columns;
+    previewTotal = r.total;
+    previewSourceTotal = r.source_total;
+    previewFilteredTotal = r.filtered_total;
+    excludedIds = new Set();
+    page = 0;
+
+    renderPreviewPanel();
+    log('预览完成：源表总数据 ' + r.source_total + ' 条，筛选后 ' + r.filtered_total + ' 条，本次将传输 ' + r.total + ' 条');
+  } catch (e) {
+    log('预览出错：' + e.message);
+  } finally {
+    $('btnTransfer').disabled = false;
+  }
+}
+
+function jdyLabel(key) {
+  const w = jdyWidgets.find(x => x.name === key);
+  return w ? w.label : key;
+}
+
+function renderPreviewPanel() {
+  const box = $('jdyResult');
+  const selectedCount = previewTotal - excludedIds.size;
+  let html = '<div class="summary">'
+    + '源表总数据 <b>' + previewSourceTotal + '</b> 条<br>'
+    + '时间筛选后 <b>' + previewFilteredTotal + '</b> 条<br>'
+    + '本次将传输 <b id="selCount">' + selectedCount + '</b> 条（已取消 <b id="exclCount">' + excludedIds.size + '</b> 条）'
+    + '</div>';
+
+  html += '<div class="two-col" style="margin-bottom:8px;">'
+    + '<button class="btn gray" onclick="toggleAll(true)">全选</button>'
+    + '<button class="btn gray" onclick="toggleAll(false)">全不选</button>'
+    + '</div>';
+
+  html += renderPreviewTable();
+  html += renderPager();
+
+  html += '<div style="margin-top:12px;">'
+    + '<button class="btn green" onclick="confirmTransfer()">确认传输（' + selectedCount + ' 条）</button>'
+    + '</div>';
+
+  box.innerHTML = html;
+}
+
+function renderPreviewTable() {
+  const start = page * PAGE_SIZE;
+  const slice = previewRows.slice(start, start + PAGE_SIZE);
+  let html = '<div class="preview-scroll"><table><tr><th class="checkbox-cell">'
+    + '<input type="checkbox" id="chkAll" onchange="onPageAll(this)" checked></th><th>#</th>';
+  previewColumns.forEach(c => { html += '<th>' + jdyLabel(c) + '</th>'; });
+  html += '</tr>';
+
+  slice.forEach((row, idx) => {
+    const rid = row._row_id;
+    const checked = !excludedIds.has(rid);
+    html += '<tr><td class="checkbox-cell"><input type="checkbox" data-id="' + rid + '" '
+      + (checked ? 'checked' : '') + ' onchange="onRowToggle(this)"></td>'
+      + '<td>' + (start + idx + 1) + '</td>';
+    previewColumns.forEach(c => {
+      const v = row[c] === undefined || row[c] === null ? '' : String(row[c]);
+      html += '<td title="' + v.replace(/"/g, '&quot;') + '">' + v + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</table></div>';
+  return html;
+}
+
+function renderPager() {
+  const totalPages = Math.max(1, Math.ceil(previewRows.length / PAGE_SIZE));
+  return '<div class="pager">'
+    + '<button onclick="gotoPage(' + (page - 1) + ')" ' + (page <= 0 ? 'disabled' : '') + '>上一页</button>'
+    + '<span>第 ' + (page + 1) + ' / ' + totalPages + ' 页（共 ' + previewRows.length + ' 行）</span>'
+    + '<button onclick="gotoPage(' + (page + 1) + ')" ' + (page >= totalPages - 1 ? 'disabled' : '') + '>下一页</button>'
+    + '</div>';
+}
+
+function onRowToggle(el) {
+  const id = parseInt(el.getAttribute('data-id'));
+  if (el.checked) excludedIds.delete(id); else excludedIds.add(id);
+  updateCountDisplay();
+}
+
+function onPageAll(el) {
+  const start = page * PAGE_SIZE;
+  const slice = previewRows.slice(start, start + PAGE_SIZE);
+  slice.forEach(row => {
+    if (el.checked) excludedIds.delete(row._row_id);
+    else excludedIds.add(row._row_id);
+  });
+  document.querySelectorAll('.preview-scroll input[type=checkbox][data-id]').forEach(c => c.checked = el.checked);
+  updateCountDisplay();
+}
+
+function toggleAll(on) {
+  if (on) excludedIds.clear();
+  else previewRows.forEach(r => excludedIds.add(r._row_id));
+  renderPreviewPanel();
+}
+
+function gotoPage(p) {
+  const totalPages = Math.max(1, Math.ceil(previewRows.length / PAGE_SIZE));
+  if (p < 0 || p >= totalPages) return;
+  page = p;
+  renderPreviewPanel();
+}
+
+function updateCountDisplay() {
+  const sel = document.getElementById('selCount');
+  const exc = document.getElementById('exclCount');
+  if (sel) sel.textContent = previewTotal - excludedIds.size;
+  if (exc) exc.textContent = excludedIds.size;
+}
+
+// 确认传输（真正写入）
+async function confirmTransfer() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  const selected = getSelectedDbFields();
+  const rows = [...document.querySelectorAll('#mappingList .map-row')];
+  const targetFields = rows.map(r => r.querySelector('select').value);
+  const sourceFields = selected;
+  const platform = $('platformValue').value.trim();
+  const limit = parseInt($('limitNum').value) || 0;
+  const timeField = currentTimeField;
+  const { date_from, date_to } = getDateRange();
+
+  if (excludedIds.size > 0 && excludedIds.size >= previewTotal) {
+    alert('已全部取消勾选，没有数据可传输'); return;
+  }
+  if (!confirm('确认传输 ' + (previewTotal - excludedIds.size) + ' 条数据到简道云？')) return;
+
+  $('progress').style.display = 'block';
+  $('progressBar').style.width = '5%';
+  log('开始传输…');
+
+  try {
+    const resp = await fetch('/api/transfer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        source: currentSourceId,
+        database: db, table: table,
+        source_fields: sourceFields, target_fields: targetFields,
+        platform_value: platform, limit: limit,
+        time_field: timeField,
+        date_from: date_from, date_to: date_to,
+        excluded_ids: [...excludedIds]
+      })
+    });
+    const r = await resp.json();
+    $('progressBar').style.width = '100%';
+    log(r.message + '\n' + (r.errors && r.errors.length ? '错误明细：\n' + r.errors.join('\n') : ''));
+  } catch (e) {
+    log('传输出错：' + e.message);
+  } finally {
+    setTimeout(() => { $('progress').style.display = 'none'; $('progressBar').style.width = '0'; }, 2000);
+  }
+}
+
+// 查看简道云表单已有数据
+async function viewJdyData() {
+  const box = $('jdyResult');
+  box.innerHTML = '<div class="hint">加载中…</div>';
+  try {
+    const r = await fetch('/api/jdy/preview?limit=50').then(x => x.json());
+    let html = '<div class="summary">简道云表单已有数据（最近 ' + r.rows.length + ' 条）</div>';
+    html += '<div class="preview-scroll"><table><tr>';
+    r.columns.forEach(c => { html += '<th>' + c + '</th>'; });
+    html += '</tr>';
+    r.rows.forEach(row => {
+      html += '<tr>' + row.map(v => '<td title="' + String(v).replace(/"/g, '&quot;') + '">' + v + '</td>').join('') + '</tr>';
+    });
+    html += '</table></div>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div class="hint">加载失败：' + e.message + '</div>';
+  }
+}
+
+function log(msg) {
+  const el = $('log');
+  el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+}
+
+init();
+</script>
+</body>
+</html>
