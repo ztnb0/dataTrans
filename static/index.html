@@ -98,8 +98,6 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
         <div class="hint" style="margin-bottom:6px;">时间字段 <b id="timeFieldName"></b>：作为筛选条件，并作为“平台数据创建时间”的来源。</div>
         <label>起始时间（不选日=按月初，不选月=按年初）</label>
         <div id="dateFromRow"></div>
-        <label>结束时间（不选日=按月末，不选月=按年末）</label>
-        <div id="dateToRow"></div>
       </div>
     </div>
     <div class="panel">
@@ -150,7 +148,6 @@ let currentTimeField = '';  // 当前勾选中的时间字段名
 let currentSourceType = 'mysql';   // 当前数据源类型 mysql/oracle
 let currentSourceSchemas = [];     // oracle 多 schema 列表
 let currentIsMerge = false;        // 是否"全部合并"模式
-let previewHasSchema = false;      // 预览是否带来源(schema)列
 
 const $ = id => document.getElementById(id);
 
@@ -376,7 +373,6 @@ function updateTimeFilterUI() {
   $('timeFieldName').textContent = currentTimeField;
   const yearOnly = isYearField(currentTimeField);
   $('dateFromRow').innerHTML = buildDatePicker('from', yearOnly);
-  $('dateToRow').innerHTML = buildDatePicker('to', yearOnly);
 }
 
 function onDateChange(prefix) {
@@ -428,7 +424,7 @@ function rebuildMapping() {
   updateTimeFilterUI();
 }
 
-// 读取起止日期，返回 {date_from, date_to}（不选日=到月，不选月=到年）
+// 读取起始时间，返回 {date_from, date_to}（date_to 恒空；不选日=到月，不选月=到年）
 function getDateRange() {
   function read(prefix) {
     const y = $(prefix + '_y') ? $(prefix + '_y').value : '';
@@ -440,7 +436,7 @@ function getDateRange() {
     if (!d) return y + '-' + mm;
     return y + '-' + mm + '-' + String(d).padStart(2, '0');
   }
-  return { date_from: read('from'), date_to: read('to') };
+  return { date_from: read('from'), date_to: '' };
 }
 
 async function previewData() {
@@ -499,7 +495,6 @@ async function previewTransfer() {
     previewTotal = r.total;
     previewSourceTotal = r.source_total;
     previewFilteredTotal = r.filtered_total;
-    previewHasSchema = !!r.has_schema;
     excludedIds = new Set();
     page = 0;
 
@@ -546,7 +541,6 @@ function renderPreviewTable() {
   const slice = previewRows.slice(start, start + PAGE_SIZE);
   let html = '<div class="preview-scroll"><table><tr><th class="checkbox-cell">'
     + '<input type="checkbox" id="chkAll" onchange="onPageAll(this)" checked></th><th>#</th>';
-  if (previewHasSchema) html += '<th>来源</th>';
   previewColumns.forEach(c => { html += '<th>' + jdyLabel(c) + '</th>'; });
   html += '</tr>';
 
@@ -556,7 +550,6 @@ function renderPreviewTable() {
     html += '<tr><td class="checkbox-cell"><input type="checkbox" data-id="' + rid + '" '
       + (checked ? 'checked' : '') + ' onchange="onRowToggle(this)"></td>'
       + '<td>' + (start + idx + 1) + '</td>';
-    if (previewHasSchema) html += '<td>' + (row._schema || '') + '</td>';
     previewColumns.forEach(c => {
       const v = row[c] === undefined || row[c] === null ? '' : String(row[c]);
       html += '<td title="' + v.replace(/"/g, '&quot;') + '">' + v + '</td>';

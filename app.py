@@ -545,18 +545,18 @@ def transfer_preview(req: TransferRequest):
     columns = list(req.target_fields)
     if time_field and JDY_TIME_KEY not in columns:
         columns.append(JDY_TIME_KEY)
+    if req.platform_value and JDY_PLATFORM_KEY not in columns:
+        columns.append(JDY_PLATFORM_KEY)
 
     col_index = {name: idx for idx, name in enumerate(fields)}
     out_rows = []
     for row in rows:
         obj = {'_row_id': _row_id(pk, row, fields, has_schema)}
-        if has_schema:
-            obj['_schema'] = row[col_index['_schema']]
         for j, src in enumerate(req.source_fields):
             obj[req.target_fields[j]] = to_display(row[col_index[src]])
         if time_field:
             obj[JDY_TIME_KEY] = to_display(_time_value(row[col_index[time_field]]))
-        if req.platform_value and JDY_PLATFORM_KEY in req.target_fields:
+        if req.platform_value:
             obj[JDY_PLATFORM_KEY] = req.platform_value
         out_rows.append(obj)
 
@@ -566,7 +566,6 @@ def transfer_preview(req: TransferRequest):
         'total': total,
         'columns': columns,
         'rows': out_rows,
-        'has_schema': has_schema,
     }
 
 
@@ -599,7 +598,7 @@ def transfer(req: TransferRequest):
                 rec[req.target_fields[j]] = normalize_value(row[col_index[req.source_fields[j]]])
             if time_field:
                 rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
-            if req.platform_value and JDY_PLATFORM_KEY in req.target_fields:
+            if req.platform_value:
                 rec[JDY_PLATFORM_KEY] = {'value': req.platform_value}
             data_list.append(rec)
 
