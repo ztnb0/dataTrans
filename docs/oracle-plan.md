@@ -8,59 +8,69 @@
 
 | 功能 | 现状（MySQL） | Oracle 实现 |
 |---|---|---|
-| 驱动 | `pymysql` | `oracledb`（见下方"驱动/模式"结论） |
-| 连接 | `pymysql.connect(host,port,user,password,charset)` | `oracledb.connect(user, password, dsn="host:1521/ORCL")` |
+| 驱动 | `pymysql` | `oracledb`（thick 模式） |
+| 连接 | `pymysql.connect(host,port,user,password,charset)` | `oracledb.connect(user, password, dsn="host:1521/ORCL", encoding="GBK", nencoding="UTF-8")` |
 | 列库 | `SHOW DATABASES` | schema（用户）当"库"处理，三级层级 |
 | 列表 | `SHOW TABLES FROM db` | `SELECT table_name FROM ALL_TABLES WHERE owner=:1` |
 | 列字段 | `SHOW FULL COLUMNS` | `ALL_TAB_COLUMNS` + `ALL_COL_COMMENTS` |
 | 主键 | `information_schema.COLUMNS` | `ALL_CONSTRAINTS` + `ALL_CONS_COLUMNS` |
-| 分页 | `LIMIT n` | 待确认 Oracle 版本后定（`FETCH FIRST n ROWS ONLY` 或 `ROWNUM`） |
+| 分页 | `LIMIT n` | `ROWNUM`（10g 无 `FETCH FIRST`） |
 | 占位符 | `%s` | `:1`（oracledb） |
 | 标识符 | 反引号 `` ` `` | 双引号 `"`（Oracle 默认大写） |
-| 字符集 | `charset=gbk` | 需处理（见"字符集"结论） |
+| 字符集 | `charset=gbk` | `encoding="GBK"`（见"字符集"结论） |
 
-## 关键结论（已实际探测）
+## 关键结论（已实际探测确认）
 
-### 1. 驱动与连接模式
-- 已安装 `oracledb==4.0.2`。
-- 实测 thin 模式（纯 Python）连接 `114.113.151.60:1521/ORCL` **失败**，报 `DPY-3010: connections to this database server version are not supported by python-oracledb in thin mode`。
-- **结论**：该 Oracle 服务器版本较老，thin 模式不支持，必须使用 **thick 模式**，且需安装 **Oracle Instant Client**（本机当前未安装，`ORACLE_HOME` 为空）。
-- 实施前需先解决 Instant Client 安装，否则无法连接。
+### 1. 服务器与客户端版本
+- **服务器：Oracle Database 10g (10.2.0.5.0)**，非常老。
+- **客户端：Instant Client 21.15**（`D:\Program Files\OracleInstantClient\instantclient_21_15`，已下载并解压）。
+- 必须用 **thick 模式**：`oracledb.init_oracle_client(lib_dir=<instantclient路径>)`。
+  - thin 模式报 `DPY-3010`（10g 不支持 thin）。
+  - 原 12.2 客户端报 `DPI-1050`（oracledb 4.x 要求客户端 ≥19.1）。
+- 已解决：装了 VS2013 运行库（`msvcr120.dll`，Instant Client 12.2 需要；21.15 用 `vcruntime140.dll` 已具备）。
 
-### 2. Oracle 版本
-- 因 thin 模式连不上，无法直接探测 `v$version`。
-- 由 DPY-3010 判断：服务器版本低于 thin 模式支持下限（低于 12.1，大概率 11g 或更早）。
-- 需在安装 Instant Client 后用 thick 模式重新探测确认。
+### 2. 数据库结构（重要）
+- 登录用户 `CLAZZ` 下**没有表**（0 张）。
+- 实际表分布在其他 schema：`BFEC`（3张）、`GZFEC`（1张）、`SHFEC`（1张）。
+- 核心表：**`BFEC.CLAZZ`**（班级表，对应 MySQL 的 `coaching_class`）。
+- 因此"库"这一级应映射为 **schema（BFEC/GZFEC/SHFEC）**，而非"数据库"或用户。
 
 ### 3. 字符集
-- 需要处理。Oracle 端中文编码（`NLS_LANG` / 数据库字符集如 `AL32UTF8` 或 `ZHS16GBK`）与 Python 端不一致时，预览会乱码。
-- 计划在连接时显式设置 `encoding` / `nencoding`（如 `oracledb.connect(..., encoding="UTF-8", nencoding="UTF-8")`），并以探测到的 `NLS_CHARACTERSET` 为准调整。
+- 数据库字符集：**`ZHS16GBK`**（中文 GBK），NCHAR 字符集 `AL16UTF16`。
+- 连接时需 `oracledb.connect(..., encoding="GBK", nencoding="UTF-8")`，否则中文乱码。
+- 验证方式：读取 `all_col_comments` 的中文注释（已实测能取到"收款人""机构名称"等）。
+
+### 4. 目标表字段参考（BFEC.CLAZZ）
+- 关键字段：`CLASS_CODE`（班级编码）、`CLASS_NAME`（班级名称）、`BEGIN_DATE`（开课日期）、`CREATE_DATE`、`CLASS_ID`（主键，NUMBER）。
+- 字段命名风格与 MySQL 的 `coaching_class`（`class_number`/`class_name`）不同，映射关系需单独确认。
 
 ## 已确认的设计决策
-1. **层级**：三级（schema/用户 当"库" → 表 → 字段），前端沿用现有三级结构。
-2. **表归属**：默认 `CLAZZ` schema（用户 `clazz` 对应 schema `CLAZZ`），后续如需跨 schema 再扩展。
-3. **字符集**：需要处理（见上）。
-4. **版本**：待 thick 模式可用后探测。
+1. **层级**：三级（**schema 当"库"** → 表 → 字段），前端沿用现有三级结构。
+2. **表归属**：默认 `BFEC` schema（核心班级表 `BFEC.CLAZZ`），"库"下拉列出 BFEC/GZFEC/SHFEC。
+3. **字符集**：`encoding="GBK"` + `nencoding="UTF-8"`。
+4. **版本**：Oracle 10g，分页用 `ROWNUM`。
 
 ## 实施步骤
 
-### 1. 前置依赖
-- 安装 Oracle Instant Client（Basic 包），并配置 `oracledb.init_oracle_client(lib_dir=...)` 或系统环境变量。
-- `pip install oracledb`（已完成）。
+### 1. 前置依赖（已完成）
+- ✅ `pip install oracledb`（4.0.2）
+- ✅ Instant Client 21.15 已解压到 `D:\Program Files\OracleInstantClient\instantclient_21_15`
+- ✅ VS2013 / VS2015 运行库已具备
 
 ### 2. 配置扩展 `config.json`
 ```json
 {
-  "id": "oracle-clazz",
+  "id": "oracle-bfec",
   "type": "oracle",
-  "name": "Oracle 线上库",
+  "name": "Oracle 线上库(BFEC)",
   "host": "114.113.151.60",
   "port": 1521,
   "user": "clazz",
-  "service": "ORCL"
+  "service": "ORCL",
+  "instant_client": "D:/Program Files/OracleInstantClient/instantclient_21_15"
 }
 ```
-- 密码走 `.env`，key = `DB_ORACLE_CLAZZ_PASSWORD`（沿用命名规则）。
+- 密码走 `.env`，key = `DB_ORACLE_BFEC_PASSWORD`（沿用命名规则）。
 - MySQL 源补 `"type": "mysql"`，后端默认 mysql 以兼容旧配置。
 
 ### 3. 后端方言抽象
@@ -69,6 +79,7 @@
   - `list_databases / list_tables / list_columns / get_primary_key / preview / _read_rows / build_time_where`
   - 每处 SQL 按 type 分派（MySQL 版 vs Oracle 版）
 - `safe_ident` 区分：Oracle 用 `"`，标识符大写。
+- Oracle 分页用 `ROWNUM`：`SELECT * FROM (...) WHERE ROWNUM <= n`。
 
 ### 4. 前端
 - 基本无需大改（前端只面对统一抽象）。
@@ -78,10 +89,32 @@
 - 用真实连接做只读验证（`list_tables` / `list_columns` / `preview`），确认中文不乱码后再放开传输。
 
 ## 待办 / 阻塞项
-- [ ] 安装 Oracle Instant Client（阻塞，无它无法 thick 模式连接）
-- [ ] thick 模式下重新探测 Oracle 版本、`NLS_CHARACTERSET`、`CLAZZ` 表清单
-- [ ] 确定分页写法（取决于版本）
-- [ ] 中文乱码验证与处理
+- [x] 安装 Oracle Instant Client 21.15（已完成）
+- [x] thick 模式探测版本、字符集、表清单（已完成）
+- [x] 确定分页写法（10g → ROWNUM）
+- [ ] 字段映射关系确认（BFEC.CLAZZ 与简道云字段的对应）
+- [ ] 中文乱码验证与处理（GBK，已定位方案）
+
+## 部署说明（别人主机使用怎么办）
+
+**核心问题**：Oracle 连接依赖 Instant Client（本地 DLL）+ VS 运行库，别人主机没有就无法连 Oracle。
+
+**方案 A：随项目分发 Instant Client（推荐）**
+- 把 Instant Client 目录放进项目（或独立压缩包），`config.json` 里写相对路径。
+- 后端 `oracledb.init_oracle_client(lib_dir=<相对路径>)`。
+- 别人拿到代码 + Instant Client 目录即可用，无需系统级安装。
+
+**方案 B：文档说明，各自安装**
+- README 写明需要安装 Instant Client 21+ 和 VS2015 运行库，`config.json` 填各自路径。
+
+**方案 C：混合（推荐落地方式）**
+- `config.json` 的 `instant_client` 字段写路径，留空则尝试：
+  1. 环境变量 `ORACLE_CLIENT_LIB`
+  2. 项目内置的 `instantclient/` 目录
+  3. 系统 PATH 里的 oci.dll
+- 纯 MySQL 用户**完全不装 Instant Client 也不影响**（只有选了 oracle 源才 init client，且失败时给清晰报错）。
+
+> 建议：Oracle 支持做成**惰性初始化**——不选 Oracle 源就不加载 oracledb thick 模式，避免所有用户都必须装客户端。
 
 ## 建议分支流程
 ```bash
