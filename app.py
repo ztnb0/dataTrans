@@ -287,6 +287,7 @@ class TransferRequest(BaseModel):
     date_to: Optional[str] = ''
     excluded_ids: Optional[List[str]] = None  # 取消勾选（不传输）的行标识列表
     schemas: Optional[List[str]] = None       # Oracle 多 schema 合并（如 ['BFEC','SHFEC','GZFEC']）
+    transforms: Optional[List[str]] = None    # 每个映射字段的转换类型（batch_number / city_name / ''），与 source_fields 等长
 
 
 class SourceRequest(BaseModel):
@@ -383,6 +384,48 @@ def to_display(val):
     if isinstance(val, bytes):
         return val.decode('utf-8', errors='ignore')
     return str(val)
+
+
+# ---------- 值转换规则（传输映射规则） ----------
+PROVINCES = [
+    '内蒙古', '黑龙江',            # 3 字，优先匹配
+    '北京', '天津', '上海', '重庆', '香港', '澳门',
+    '河北', '山西', '辽宁', '吉林', '江苏', '浙江', '安徽', '福建',
+    '江西', '山东', '河南', '湖北', '湖南', '广东', '海南', '四川',
+    '贵州', '云南', '陕西', '甘肃', '青海', '台湾',
+    '广西', '宁夏', '新疆', '西藏',
+]
+
+
+def extract_city(area):
+    """去掉省级前缀，返回市名（无匹配时原样去尾"市"）"""
+    a = (area or '').strip()
+    if not a:
+        return ''
+    for p in PROVINCES:
+        if a.startswith(p):
+            city = a[len(p):] or p   # 直辖市：北京北京 -> 北京
+            return city.rstrip('市')
+    return a.rstrip('市')
+
+
+def apply_transform(value, transform_type):
+    """按转换类型处理字段值；返回 None 表示该行应跳过（不传输）"""
+    if not transform_type:
+        return value
+    if transform_type == 'batch_number':
+        s = '' if value is None else str(value)
+        m = re.search(r'(\d+)批', s)
+        return m.group(1) if m else s
+    if transform_type == 'city_name':
+        a = '' if value is None else str(value)
+        if '在线考试' in a:
+            return None                      # 问题三：在线考试忽略
+        city = extract_city(a)
+        if not city or city == '其他':
+            return None                      # 问题二：无明确市名排除
+        return city + '考场'
+    return value
 
 
 def __json(obj):
@@ -702,6 +745,38 @@ def _time_value(val):
     return val
 
 
+def _transform_and_filter_rows(req, fields, rows, has_schema):
+    """对读出的原始行做：值转换 + 跳过（无明确市名/在线考试）+ 去重（批次号相同且市名相同只留一条）。
+    返回 [(row, transformed_values)]，transformed_values 与 source_fields 等长（转换后的原始值）。"""
+    transforms = req.transforms or []
+    col_index = {name: idx for idx, name in enumerate(fields)}
+    # 去重键：非时间、非平台的映射目标字段（对应批次号 + 市名等业务字段）
+    dedup_indexes = [j for j, t in enumerate(req.target_fields)
+                     if t not in (JDY_TIME_KEY, JDY_PLATFORM_KEY)]
+    has_transform = any(transforms)
+    seen = set()
+    kept = []
+    for row in rows:
+        transformed = []
+        skip = False
+        for j, src in enumerate(req.source_fields):
+            val = apply_transform(row[col_index[src]],
+                                  transforms[j] if j < len(transforms) else None)
+            if val is None:
+                skip = True
+                break
+            transformed.append(val)
+        if skip:
+            continue
+        if has_transform and dedup_indexes:
+            key = tuple(to_display(transformed[j]) for j in dedup_indexes)
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append((row, transformed))
+    return kept
+
+
 @app.post('/api/transfer/preview')
 def transfer_preview(req: TransferRequest):
     """传输前预览：源表总数 + 待传输条数 + 全部待传输行（dry-run，不写库）"""
@@ -713,7 +788,8 @@ def transfer_preview(req: TransferRequest):
     pk = get_primary_key(req.source, req.database, req.table)
     source_total, filtered_total = _count_rows(req)
     fields, time_field, rows, has_schema = _read_rows(req, exclude=False)
-    total = len(rows)
+    kept = _transform_and_filter_rows(req, fields, rows, has_schema)
+    total = len(kept)
 
     columns = list(req.target_fields)
     if time_field and JDY_TIME_KEY not in columns:
@@ -723,10 +799,10 @@ def transfer_preview(req: TransferRequest):
 
     col_index = {name: idx for idx, name in enumerate(fields)}
     out_rows = []
-    for row in rows:
+    for row, transformed in kept:
         obj = {'_row_id': _row_id(pk, row, fields, has_schema)}
         for j, src in enumerate(req.source_fields):
-            obj[req.target_fields[j]] = to_display(row[col_index[src]])
+            obj[req.target_fields[j]] = to_display(transformed[j])
         if time_field:
             obj[JDY_TIME_KEY] = to_display(_time_value(row[col_index[time_field]]))
         if req.platform_value:
@@ -751,8 +827,9 @@ def transfer(req: TransferRequest):
         raise HTTPException(400, '映射字段数量不匹配')
 
     fields, time_field, rows, has_schema = _read_rows(req, exclude=True)
+    kept = _transform_and_filter_rows(req, fields, rows, has_schema)
 
-    total = len(rows)
+    total = len(kept)
     if total == 0:
         return {'success': 0, 'fail': 0, 'total': 0, 'message': '没有要传输的数据'}
 
@@ -763,12 +840,12 @@ def transfer(req: TransferRequest):
     errors = []
 
     for i in range(0, total, JDY_BATCH_SIZE):
-        batch = rows[i:i + JDY_BATCH_SIZE]
+        batch = kept[i:i + JDY_BATCH_SIZE]
         data_list = []
-        for row in batch:
+        for row, transformed in batch:
             rec = {}
             for j in range(n_fields):
-                rec[req.target_fields[j]] = normalize_value(row[col_index[req.source_fields[j]]])
+                rec[req.target_fields[j]] = normalize_value(transformed[j])
             if time_field:
                 rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
             if req.platform_value:

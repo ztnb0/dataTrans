@@ -24,6 +24,7 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
 .mapping { font-size: 12px; }
 .map-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .map-row select { margin-bottom: 0; flex: 1; }
+.map-row .transform-sel { flex: 0 0 108px; }
 .map-row .arrow { color: #2b6cb0; flex: 0 0 auto; }
 .btn { background: #2b6cb0; color: #fff; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
 .btn:hover { background: #2c5282; }
@@ -591,10 +592,21 @@ function guessTarget(src) {
   return jdyWidgets.length ? jdyWidgets[0].name : '';
 }
 
+// 按字段名猜测转换规则（仅针对明确的模式）
+function guessTransform(src) {
+  const n = src.toUpperCase();
+  if (n.indexOf('PLANNAME') >= 0) return 'batch_number';
+  if (n.indexOf('AREANAME') >= 0) return 'city_name';
+  return '';
+}
+
 function rebuildMapping() {
   const selected = getSelectedDbFields();
   const box = $('mappingList');
   box.innerHTML = '';
+  const tOpts = '<option value="">无转换</option>'
+    + '<option value="batch_number">提取批次号</option>'
+    + '<option value="city_name">市名+考场</option>';
   selected.forEach(src => {
     const row = document.createElement('div');
     row.className = 'map-row';
@@ -602,10 +614,14 @@ function rebuildMapping() {
       '<option value="' + w.name + '">' + w.label + '</option>').join('');
     row.innerHTML = '<span style="flex:1;">' + src + '</span>'
       + '<span class="arrow">→</span>'
-      + '<select>' + opts + '</select>';
-    const sel = row.querySelector('select');
+      + '<select class="target-sel">' + opts + '</select>'
+      + '<select class="transform-sel" title="转换规则">' + tOpts + '</select>';
+    const sel = row.querySelector('.target-sel');
     const g = guessTarget(src);
     if (g) sel.value = g;
+    const tsel = row.querySelector('.transform-sel');
+    const gt = guessTransform(src);
+    if (gt) tsel.value = gt;
     box.appendChild(row);
   });
   if (selected.length === 0) box.innerHTML = '<span style="color:#999;">请先在左侧勾选字段。</span>';
@@ -644,7 +660,8 @@ async function previewTransfer() {
   const db = $('db').value.trim(), table = $('table').value.trim();
   const selected = getSelectedDbFields();
   const rows = [...document.querySelectorAll('#mappingList .map-row')];
-  const targetFields = rows.map(r => r.querySelector('select').value);
+  const targetFields = rows.map(r => r.querySelector('.target-sel').value);
+  const transforms = rows.map(r => r.querySelector('.transform-sel').value);
   const sourceFields = selected;
 
   if (selected.length === 0) { alert('请先在左侧勾选要传输的字段'); return; }
@@ -662,6 +679,7 @@ async function previewTransfer() {
       source: currentSourceId,
       database: db, table: table,
       source_fields: sourceFields, target_fields: targetFields,
+      transforms: transforms,
       platform_value: platform, limit: limit,
       time_field: timeField,
       date_from: date_from, date_to: date_to
@@ -799,7 +817,8 @@ async function confirmTransfer() {
   const db = $('db').value.trim(), table = $('table').value.trim();
   const selected = getSelectedDbFields();
   const rows = [...document.querySelectorAll('#mappingList .map-row')];
-  const targetFields = rows.map(r => r.querySelector('select').value);
+  const targetFields = rows.map(r => r.querySelector('.target-sel').value);
+  const transforms = rows.map(r => r.querySelector('.transform-sel').value);
   const sourceFields = selected;
   const platform = $('platformValue').value.trim();
   const limit = parseInt($('limitNum').value) || 0;
@@ -820,6 +839,7 @@ async function confirmTransfer() {
       source: currentSourceId,
       database: db, table: table,
       source_fields: sourceFields, target_fields: targetFields,
+      transforms: transforms,
       platform_value: platform, limit: limit,
       time_field: timeField,
       date_from: date_from, date_to: date_to,
