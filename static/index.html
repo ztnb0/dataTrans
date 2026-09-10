@@ -57,6 +57,24 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
 .search-drop .opt:hover { background: #ebf4ff; }
 .search-drop .opt.hl { background: #2b6cb0; color: #fff; }
 .search-drop .empty { padding: 7px 10px; font-size: 12px; color: #999; }
+.label-row { display: flex; align-items: center; justify-content: space-between; }
+.label-row label { margin-bottom: 0; }
+.btn.mini { padding: 4px 10px; font-size: 12px; }
+.modal-mask { display: flex; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 1000; align-items: center; justify-content: center; }
+.modal { background: #fff; border-radius: 8px; width: 440px; max-width: 92vw; padding: 20px; box-shadow: 0 8px 30px rgba(0,0,0,.2); }
+.modal h2 { font-size: 16px; color: #2b6cb0; margin-bottom: 14px; }
+.modal .row { margin-bottom: 10px; }
+.modal .row.two { display: flex; gap: 8px; }
+.modal .row.two > div { flex: 1; }
+.modal label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+.modal input, .modal select { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal .msg { font-size: 12px; min-height: 16px; margin-top: 8px; }
+.modal .msg.ok { color: #2f855a; }
+.modal .msg.err { color: #c53030; }
+.opt { display: flex; align-items: center; justify-content: space-between; }
+.opt .del { color: #c53030; font-weight: 700; padding: 0 6px; border-radius: 3px; }
+.opt .del:hover { background: #fed7d7; }
 </style>
 </head>
 <body>
@@ -65,7 +83,10 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
   <!-- 左栏：数据库 -->
   <div class="panel">
     <h2>① 后台数据库（左）</h2>
-    <label>数据源</label>
+    <div class="label-row">
+      <label>数据源</label>
+      <button class="btn mini" onclick="openAddSource()">+ 添加数据源</button>
+    </div>
     <div class="search-box">
       <input type="text" id="source" placeholder="搜索或选择数据源…" autocomplete="off" oninput="filterSource()" onfocus="filterSource()">
       <div class="search-drop" id="sourceDrop"></div>
@@ -130,6 +151,46 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
   <div class="preview" id="previewBox"><div class="hint">点击“预览源数据”查看源表前 5 条。</div></div>
 </div>
 
+<div class="modal-mask" id="sourceModal" style="display:none;" onclick="if(event.target===this)closeAddSource()">
+  <div class="modal">
+    <h2>添加数据源</h2>
+    <div class="row">
+      <label>类型</label>
+      <select id="srcType" onchange="toggleSourceForm()">
+        <option value="mysql">MySQL</option>
+        <option value="oracle">Oracle</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>名称</label>
+      <input type="text" id="srcName" placeholder="如：182测试数据库">
+    </div>
+    <div class="row two">
+      <div><label>主机</label><input type="text" id="srcHost" placeholder="如：192.168.2.182"></div>
+      <div><label>端口</label><input type="number" id="srcPort" value="3306"></div>
+    </div>
+    <div class="row two">
+      <div><label>用户名</label><input type="text" id="srcUser"></div>
+      <div><label>密码</label><input type="password" id="srcPassword"></div>
+    </div>
+    <div class="row" id="srcCharsetRow">
+      <label>字符集</label>
+      <input type="text" id="srcCharset" value="gbk">
+    </div>
+    <div id="oracleFields" style="display:none;">
+      <div class="row"><label>服务名（service）</label><input type="text" id="srcService" placeholder="如：ORCL"></div>
+      <div class="row"><label>Schema 列表（逗号分隔，可留空）</label><input type="text" id="srcSchemas" placeholder="如：BFEC,SHFEC,GZFEC"></div>
+      <div class="row"><label>Instant Client 路径</label><input type="text" id="srcInstantClient" placeholder="如：D:/.../instantclient_21_15"></div>
+    </div>
+    <div class="msg" id="srcMsg"></div>
+    <div class="modal-actions">
+      <button class="btn gray" onclick="testSource()">测试连接</button>
+      <button class="btn green" onclick="saveSource()">保存</button>
+      <button class="btn gray" onclick="closeAddSource()">取消</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let jdyWidgets = [];
 let dbColumns = [];
@@ -182,7 +243,10 @@ function renderSourceDrop() {
     dd.innerHTML = '<div class="empty">无匹配</div>';
   } else {
     dd.innerHTML = filtered.map(s =>
-      '<div class="opt" data-id="' + s.id + '" data-name="' + s.name + '">' + s.name + '</div>').join('');
+      '<div class="opt" data-id="' + s.id + '" data-name="' + s.name + '">'
+      + '<span>' + s.name + '</span>'
+      + (s.user_added ? '<span class="del" data-del="' + s.id + '" title="删除">×</span>' : '')
+      + '</div>').join('');
   }
   dd.style.display = 'block';
   dd.querySelectorAll('.opt').forEach(o => {
@@ -196,6 +260,130 @@ function renderSourceDrop() {
       loadDatabases();
     };
   });
+  dd.querySelectorAll('.del').forEach(d => {
+    d.onclick = (e) => {
+      e.stopPropagation();
+      deleteSource(d.getAttribute('data-del'));
+    };
+  });
+}
+
+// ---------- 添加 / 删除数据源 ----------
+function openAddSource() {
+  $('srcType').value = 'mysql';
+  $('srcName').value = '';
+  $('srcHost').value = '';
+  $('srcPort').value = '3306';
+  $('srcUser').value = '';
+  $('srcPassword').value = '';
+  $('srcCharset').value = 'gbk';
+  $('srcService').value = '';
+  $('srcSchemas').value = '';
+  $('srcInstantClient').value = '';
+  $('srcMsg').textContent = '';
+  toggleSourceForm();
+  $('sourceModal').style.display = 'flex';
+}
+
+function closeAddSource() {
+  $('sourceModal').style.display = 'none';
+}
+
+function toggleSourceForm() {
+  const isOracle = $('srcType').value === 'oracle';
+  $('oracleFields').style.display = isOracle ? 'block' : 'none';
+  $('srcCharsetRow').style.display = isOracle ? 'none' : 'block';
+  if (!$('srcPort').value || $('srcPort').value === '3306' || $('srcPort').value === '1521') {
+    $('srcPort').value = isOracle ? '1521' : '3306';
+  }
+}
+
+function collectSourceForm() {
+  const type = $('srcType').value;
+  const body = {
+    type: type,
+    name: $('srcName').value.trim(),
+    host: $('srcHost').value.trim(),
+    port: parseInt($('srcPort').value) || 0,
+    user: $('srcUser').value.trim(),
+    password: $('srcPassword').value,
+  };
+  if (type === 'mysql') {
+    body.charset = $('srcCharset').value.trim();
+  } else {
+    body.service = $('srcService').value.trim();
+    body.instant_client = $('srcInstantClient').value.trim();
+    body.schemas = $('srcSchemas').value.split(',').map(x => x.trim()).filter(x => x);
+  }
+  return body;
+}
+
+async function testSource() {
+  const msg = $('srcMsg');
+  const body = collectSourceForm();
+  if (!body.name || !body.host || !body.user) { msg.textContent = '请填写名称、主机、用户名'; msg.className = 'msg err'; return; }
+  msg.textContent = '正在测试连接…';
+  msg.className = 'msg';
+  const r = await fetch('/api/sources/test', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(x => x.json());
+  msg.textContent = r.message;
+  msg.className = r.ok ? 'msg ok' : 'msg err';
+}
+
+async function saveSource() {
+  const msg = $('srcMsg');
+  const body = collectSourceForm();
+  if (!body.name || !body.host || !body.user) { msg.textContent = '请填写名称、主机、用户名'; msg.className = 'msg err'; return; }
+  const resp = await fetch('/api/sources', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  const r = await resp.json();
+  if (!resp.ok) { msg.textContent = (r.detail || JSON.stringify(r)); msg.className = 'msg err'; return; }
+  closeAddSource();
+  currentSourceId = r.source.id;
+  await refreshSources();
+  log('已添加数据源：' + r.source.name);
+}
+
+async function deleteSource(id) {
+  if (!confirm('确认删除该数据源？')) return;
+  const resp = await fetch('/api/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+  const r = await resp.json();
+  if (!resp.ok) { alert((r.detail || '删除失败')); return; }
+  if (currentSourceId === id) currentSourceId = '';
+  await refreshSources();
+  log('已删除数据源：' + id);
+}
+
+async function refreshSources() {
+  const r = await fetch('/api/sources').then(x => x.json());
+  sourceList = r.sources;
+  let cur = sourceList.find(x => x.id === currentSourceId);
+  if (!cur) {
+    cur = sourceList[0] || null;
+    currentSourceId = cur ? cur.id : '';
+  }
+  if (cur) {
+    $('source').value = cur.name;
+    currentSourceType = cur.type || 'mysql';
+    currentSourceSchemas = cur.schemas || [];
+  } else {
+    $('source').value = '';
+  }
+  renderSourceDrop();
+  if (!currentSourceId) {
+    dbList = []; $('db').value = ''; renderDrop('db', dbList, onPickDb);
+    tableList = []; $('table').value = ''; renderDrop('table', tableList, onPickTable);
+    dbColumns = []; $('dbFields').innerHTML = '';
+    currentTimeField = ''; updateTimeFilterUI();
+    return;
+  }
+  await loadDatabases();
 }
 
 async function loadDatabases() {

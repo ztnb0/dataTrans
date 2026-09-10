@@ -98,6 +98,62 @@ def load_config():
 load_config()
 
 
+def save_config():
+    """把内存 SOURCES 写回 config.json"""
+    sources = list(SOURCES.values())
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        json.dump({'sources': sources}, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+
+
+def save_env_password(source_id, password):
+    """在 .env 中新增/更新该数据源密码行，并同步到 os.environ"""
+    key = password_env_key(source_id)
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    else:
+        lines = []
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith(key + '='):
+            lines[i] = key + '=' + password
+            found = True
+            break
+    if not found:
+        lines.append(key + '=' + password)
+    with open(ENV_PATH, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.environ[key] = password
+
+
+def delete_env_password(source_id):
+    """从 .env 删除该数据源密码行"""
+    key = password_env_key(source_id)
+    if not os.path.exists(ENV_PATH):
+        return
+    with open(ENV_PATH, 'r', encoding='utf-8') as f:
+        lines = f.read().splitlines()
+    lines = [l for l in lines if not l.startswith(key + '=')]
+    with open(ENV_PATH, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.environ.pop(key, None)
+
+
+def gen_source_id(name):
+    """由名称生成唯一数据源 id"""
+    slug = re.sub(r'[^A-Za-z0-9]+', '-', (name or '').strip()).strip('-').lower()
+    if not slug:
+        slug = 'src'
+    base = 'user-%s-%d' % (slug[:20], int(time.time()))
+    candidate = base
+    i = 2
+    while candidate in SOURCES:
+        candidate = base + '-' + str(i)
+        i += 1
+    return candidate
+
+
 def get_source(source_id):
     if source_id not in SOURCES:
         raise HTTPException(400, '未知数据源: %s' % source_id)
@@ -159,6 +215,31 @@ def get_oracle_conn(source_id, s):
     return oracledb.connect(user=s['user'], password=get_password(source_id), dsn=dsn)
 
 
+def _connect(s):
+    """使用 source dict 建立连接（密码来自 dict，供测试连接用，不依赖 SOURCES）"""
+    if s.get('type') == 'oracle':
+        global _oracle_client_initialized
+        try:
+            import oracledb
+        except ImportError:
+            raise HTTPException(500, '未安装 oracledb，请执行 pip install oracledb')
+        if not _oracle_client_initialized:
+            lib_dir = s.get('instant_client', '')
+            if lib_dir and os.path.isdir(lib_dir):
+                oracledb.init_oracle_client(lib_dir=lib_dir)
+            else:
+                oracledb.init_oracle_client()
+            _oracle_client_initialized = True
+        host = s['host']
+        port = int(s.get('port', 1521))
+        service = s.get('service', '')
+        dsn = oracledb.makedsn(host, port, service_name=service) if service else oracledb.makedsn(host, port)
+        return oracledb.connect(user=s['user'], password=s.get('password', ''), dsn=dsn)
+    return pymysql.connect(host=s['host'], port=int(s.get('port', 3306)),
+                           user=s['user'], password=s.get('password', ''),
+                           charset=s.get('charset', 'utf8mb4'))
+
+
 def safe_ident(name):
     """校验并反引号包裹标识符，防注入"""
     if not re.match(r'^[A-Za-z0-9_\-]+$', name or ''):
@@ -206,6 +287,19 @@ class TransferRequest(BaseModel):
     date_to: Optional[str] = ''
     excluded_ids: Optional[List[str]] = None  # 取消勾选（不传输）的行标识列表
     schemas: Optional[List[str]] = None       # Oracle 多 schema 合并（如 ['BFEC','SHFEC','GZFEC']）
+
+
+class SourceRequest(BaseModel):
+    type: str = 'mysql'            # mysql / oracle
+    name: str
+    host: str
+    port: int = 0
+    user: str
+    password: str = ''
+    charset: str = ''              # mysql 用
+    service: str = ''              # oracle 用
+    schemas: List[str] = []        # oracle 多 schema
+    instant_client: str = ''       # oracle thick 模式路径
 
 
 # ---------- 时间范围 ----------
@@ -301,8 +395,87 @@ def list_sources():
     """返回数据源列表（不含密码）"""
     return {'sources': [{'id': s['id'], 'name': s.get('name', s['id']),
                          'type': s.get('type', 'mysql'),
-                         'schemas': s.get('schemas', [])}
+                         'schemas': s.get('schemas', []),
+                         'user_added': bool(s.get('user_added'))}
                         for s in SOURCES.values()]}
+
+
+def _build_source_dict(req):
+    """SourceRequest -> source dict（不含 id、user_added）"""
+    s = {
+        'type': req.type,
+        'name': req.name.strip(),
+        'host': req.host.strip(),
+        'port': int(req.port),
+        'user': req.user.strip(),
+        'password': req.password,
+    }
+    if req.type == 'mysql':
+        s['charset'] = req.charset or 'gbk'
+    elif req.type == 'oracle':
+        if req.service:
+            s['service'] = req.service.strip()
+        if req.schemas:
+            s['schemas'] = [x.strip() for x in req.schemas if x.strip()]
+        if req.instant_client:
+            s['instant_client'] = req.instant_client.strip()
+    return s
+
+
+@app.post('/api/sources/test')
+def test_source(req: SourceRequest):
+    """测试连接（不落盘）"""
+    try:
+        conn = _connect(_build_source_dict(req))
+        conn.close()
+        return {'ok': True, 'message': '连接成功'}
+    except HTTPException as e:
+        return {'ok': False, 'message': str(e.detail)}
+    except Exception as e:
+        return {'ok': False, 'message': str(e)}
+
+
+@app.post('/api/sources')
+def add_source(req: SourceRequest):
+    """新增数据源（持久化到 config.json + .env）"""
+    req.type = req.type.lower().strip()
+    if req.type not in ('mysql', 'oracle'):
+        raise HTTPException(400, 'type 只支持 mysql 或 oracle')
+    if not (req.name and req.name.strip()):
+        raise HTTPException(400, '名称不能为空')
+    if not (req.host and req.host.strip()):
+        raise HTTPException(400, '主机不能为空')
+    if not (req.user and req.user.strip()):
+        raise HTTPException(400, '用户名不能为空')
+    if not req.port:
+        req.port = 3306 if req.type == 'mysql' else 1521
+
+    source_id = gen_source_id(req.name.strip())
+    s = _build_source_dict(req)
+    s['id'] = source_id
+    s['user_added'] = True
+    s.pop('password', None)
+
+    SOURCES[source_id] = s
+    save_config()
+    if req.password:
+        save_env_password(source_id, req.password)
+
+    return {'source': {'id': source_id, 'name': s['name'], 'type': s['type'],
+                       'schemas': s.get('schemas', []), 'user_added': True}}
+
+
+@app.delete('/api/sources/{source_id}')
+def delete_source(source_id: str):
+    """删除数据源（仅限用户新增的）"""
+    if source_id not in SOURCES:
+        raise HTTPException(404, '数据源不存在: %s' % source_id)
+    if not SOURCES[source_id].get('user_added'):
+        raise HTTPException(400, '内置数据源不允许删除')
+    del SOURCES[source_id]
+    save_config()
+    delete_env_password(source_id)
+    return {'ok': True}
 
 
 @app.get('/api/databases')
