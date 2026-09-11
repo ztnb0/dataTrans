@@ -26,8 +26,22 @@
       "port": 1521,
       "user": "clazz",
       "service": "ORCL",
-      "schemas": ["BFEC", "SHFEC", "GZFEC"],
+      "schemas": [
+        "BFEC",
+        "SHFEC",
+        "GZFEC"
+      ],
       "instant_client": "D:/Program Files/OracleInstantClient/instantclient_21_15"
+    },
+    {
+      "type": "mysql",
+      "name": "飞霞系统数据库",
+      "host": "114.113.151.55",
+      "port": 3306,
+      "user": "chaxun",
+      "charset": "gbk",
+      "id": "user-src-1789010399",
+      "user_added": true
     }
   ]
 }
