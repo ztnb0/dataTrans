@@ -1,0 +1,24 @@
+[
+  {
+    "id": "coaching-class",
+    "source": "dpt-aliyun",
+    "database": "dptep",
+    "table": "coaching_class",
+    "platform_value": "教务系统",
+    "data_type_value": "班级",
+    "source_fields": ["class_number", "class_name", "class_ctime"],
+    "target_fields": ["_widget_1788918827860", "_widget_1788918827861", "_widget_1788918827862"],
+    "enabled": true
+  },
+  {
+    "id": "groupbatch",
+    "source": "dpt-aliyun",
+    "database": "dptep",
+    "table": "groupbatch",
+    "platform_value": "教务系统",
+    "data_type_value": "期次",
+    "source_fields": ["classnumber", "batchName", "createDate"],
+    "target_fields": ["_widget_1788918827860", "_widget_1788918827861", "_widget_1788918827862"],
+    "enabled": true
+  }
+]

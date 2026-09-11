@@ -18,6 +18,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 ENV_PATH = os.path.join(BASE_DIR, '.env')
+MAPPINGS_PATH = os.path.join(BASE_DIR, 'mappings.json')
 
 
 def load_env():
@@ -54,7 +55,9 @@ JDY_HEADERS = {
 JDY_BATCH_SIZE = 100
 
 # 简道云表单固定字段 key（来自该应用表单）
+JDY_ID_KEY = '_widget_1789030761638'         # id（存源表主键，匹配键）
 JDY_PLATFORM_KEY = '_widget_1788918827859'   # 平台
+JDY_DATA_TYPE_KEY = '_widget_1789030761637'  # 数据类型
 JDY_CODE_KEY = '_widget_1788918827860'       # 项目编号
 JDY_NAME_KEY = '_widget_1788918827861'       # 项目名称
 JDY_TIME_KEY = '_widget_1788918827862'       # 平台数据创建时间
@@ -200,6 +203,7 @@ class TransferRequest(BaseModel):
     source_fields: List[str]          # 数据库表字段名（映射字段）
     target_fields: List[str]          # 简道云字段 key（一一对应）
     platform_value: Optional[str] = ''  # “平台”字段手写固定值
+    data_type_value: Optional[str] = ''  # “数据类型”字段手写固定值
     limit: Optional[int] = 0          # 0 表示全部
     time_field: Optional[str] = ''    # 时间字段（筛选 + 平台数据创建时间来源）
     date_from: Optional[str] = ''     # 如 2025 / 2025-06 / 2025-06-01
@@ -547,6 +551,8 @@ def transfer_preview(req: TransferRequest):
         columns.append(JDY_TIME_KEY)
     if req.platform_value and JDY_PLATFORM_KEY not in columns:
         columns.append(JDY_PLATFORM_KEY)
+    if req.data_type_value and JDY_DATA_TYPE_KEY not in columns:
+        columns.append(JDY_DATA_TYPE_KEY)
 
     col_index = {name: idx for idx, name in enumerate(fields)}
     out_rows = []
@@ -558,6 +564,8 @@ def transfer_preview(req: TransferRequest):
             obj[JDY_TIME_KEY] = to_display(_time_value(row[col_index[time_field]]))
         if req.platform_value:
             obj[JDY_PLATFORM_KEY] = req.platform_value
+        if req.data_type_value:
+            obj[JDY_DATA_TYPE_KEY] = req.data_type_value
         out_rows.append(obj)
 
     return {
@@ -600,6 +608,8 @@ def transfer(req: TransferRequest):
                 rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
             if req.platform_value:
                 rec[JDY_PLATFORM_KEY] = {'value': req.platform_value}
+            if req.data_type_value:
+                rec[JDY_DATA_TYPE_KEY] = {'value': req.data_type_value}
             data_list.append(rec)
 
         r = requests.post(JDY_BASE + '/app/entry/data/batch_create', headers=JDY_HEADERS,
@@ -625,6 +635,179 @@ def transfer(req: TransferRequest):
         'message': '完成：成功 %d 条，失败 %d 条' % (success, fail),
         'errors': errors[:20],
     }
+
+
+# ---------- 即时同步（回调） ----------
+
+
+def load_mappings():
+    if os.path.exists(MAPPINGS_PATH):
+        try:
+            with open(MAPPINGS_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_mappings(mappings):
+    with open(MAPPINGS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(mappings, f, ensure_ascii=False, indent=2)
+
+
+class MappingRequest(BaseModel):
+    id: str
+    source: str
+    database: str
+    table: str
+    source_fields: List[str]
+    target_fields: List[str]
+    platform_value: Optional[str] = ''
+    data_type_value: Optional[str] = ''
+    enabled: Optional[bool] = True
+
+
+class NotifyRequest(BaseModel):
+    table: str
+    pk: str
+
+
+def find_mapping_by_table(table):
+    matches = [m for m in load_mappings() if m.get('table') == table and m.get('enabled', True)]
+    if not matches:
+        raise HTTPException(400, '表 %s 未配置映射' % table)
+    if len(matches) > 1:
+        raise HTTPException(400, '表 %s 配置了多套映射，无法按表名唯一定位' % table)
+    return matches[0]
+
+
+def _ident_for(source_id):
+    return oracle_ident if is_oracle(source_id) else safe_ident
+
+
+def read_source_row(mapping, pk):
+    src = mapping['source']
+    pk_col = get_primary_key(src, mapping['database'], mapping['table'])
+    fields = list(mapping['source_fields'])
+    if pk_col not in fields:
+        fields.append(pk_col)
+    ident = _ident_for(src)
+    conn = get_conn(src)
+    try:
+        cur = conn.cursor()
+        if is_oracle(src):
+            sql = 'SELECT %s FROM %s.%s WHERE %s = :1' % (
+                ','.join(ident(f) for f in fields),
+                ident(mapping['database']), ident(mapping['table']), ident(pk_col))
+            cur.execute(sql, (pk,))
+        else:
+            sql = 'SELECT %s FROM %s.%s WHERE %s = %%s' % (
+                ','.join(ident(f) for f in fields),
+                ident(mapping['database']), ident(mapping['table']), ident(pk_col))
+            cur.execute(sql, (pk,))
+        row = cur.fetchone()
+        return row, fields, pk_col
+    finally:
+        conn.close()
+
+
+def build_jdy_record(mapping, row, col_index, pk_val):
+    rec = {JDY_ID_KEY: {'value': str(pk_val)}}
+    if mapping.get('data_type_value'):
+        rec[JDY_DATA_TYPE_KEY] = {'value': mapping['data_type_value']}
+    if mapping.get('platform_value'):
+        rec[JDY_PLATFORM_KEY] = {'value': mapping['platform_value']}
+    for src, tgt in zip(mapping['source_fields'], mapping['target_fields']):
+        rec[tgt] = normalize_value(row[col_index[src]])
+    return rec
+
+
+def jdy_batch_create(data_list):
+    r = requests.post(JDY_BASE + '/app/entry/data/batch_create', headers=JDY_HEADERS,
+                      data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
+                                   'data_list': data_list}), timeout=60)
+    if r.status_code != 200:
+        raise HTTPException(500, '简道云 batch_create 失败: %s' % r.text)
+    return r.json()
+
+
+def jdy_update(data_id, data):
+    r = requests.post(JDY_BASE + '/app/entry/data/update', headers=JDY_HEADERS,
+                      data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
+                                   'data_id': data_id, 'data': data}), timeout=30)
+    if r.status_code != 200:
+        raise HTTPException(500, '简道云 update 失败: %s' % r.text)
+    return r.json()
+
+
+def jdy_find_by_id(pk, data_type_value):
+    cond = [{'field': JDY_ID_KEY, 'type': 'text', 'method': 'eq', 'value': [str(pk)]}]
+    if data_type_value:
+        cond.append({'field': JDY_DATA_TYPE_KEY, 'type': 'text',
+                     'method': 'eq', 'value': [data_type_value]})
+    r = requests.post(JDY_BASE + '/app/entry/data/list', headers=JDY_HEADERS,
+                      data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
+                                   'limit': 1,
+                                   'fields': [JDY_ID_KEY],
+                                   'filter': {'rel': 'and', 'cond': cond},
+                                   'sort': []}), timeout=30)
+    if r.status_code != 200:
+        raise HTTPException(500, '简道云数据查询失败: %s' % r.text)
+    data = r.json().get('data', [])
+    if data:
+        d = data[0]
+        return d.get('_id') or d.get('data_id') or d.get('dataId')
+    return None
+
+
+@app.get('/api/mappings')
+def list_mappings():
+    return {'mappings': load_mappings()}
+
+
+@app.post('/api/mappings')
+def save_mapping(req: MappingRequest):
+    m = req.model_dump()
+    if len(m['source_fields']) != len(m['target_fields']):
+        raise HTTPException(400, '映射字段数量不匹配')
+    mappings = load_mappings()
+    replaced = False
+    for i, old in enumerate(mappings):
+        if old.get('id') == m['id']:
+            mappings[i] = m
+            replaced = True
+            break
+    if not replaced:
+        mappings.append(m)
+    save_mappings(mappings)
+    return {'ok': True, 'mapping': m}
+
+
+@app.post('/api/sync/notify')
+def sync_notify(req: NotifyRequest):
+    if not req.table or req.pk is None or req.pk == '':
+        raise HTTPException(400, 'table / pk 不能为空')
+    mapping = find_mapping_by_table(req.table)
+
+    row, fields, pk_col = read_source_row(mapping, req.pk)
+    if row is None:
+        return {'ok': True, 'skipped': 'row_not_found'}
+
+    col_index = {name: i for i, name in enumerate(fields)}
+    pk_val = str(row[col_index[pk_col]])
+    record = build_jdy_record(mapping, row, col_index, pk_val)
+
+    data_id = jdy_find_by_id(pk_val, mapping.get('data_type_value', ''))
+    if data_id:
+        jdy_update(data_id, record)
+        action = 'update'
+    else:
+        resp = jdy_batch_create([record])
+        if resp.get('success_count', 0) <= 0:
+            raise HTTPException(500, 'batch_create 失败: %s' % __json(resp))
+        action = 'create'
+
+    return {'ok': True, 'action': action, 'pk': pk_val}
 
 
 app.mount('/', StaticFiles(directory='static', html=True), name='static')
