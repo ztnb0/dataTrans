@@ -91,6 +91,12 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 - `safe_ident` / `oracle_ident` 校验标识符防注入。
 - `config.json` 数据源不含密码；`sync_state.json`、`sync.log` 等运行时产物也加入 `.gitignore`。
 
+### 14. 前端「同步日志」面板（new）
+- 后端新增只读接口 `GET /api/sync/log?lines=100`：读取 `sync.log` 末尾 N 行并解析为结构化事件（变更 `result` / 逐条修改 `update` / 错误 `error` / 对账 `reconcile` / 空闲 `idle` / 信息 `info`），并返回「最近一轮」汇总与「最近变更」。
+- 前端底部新增「⑤ 同步日志（sync.log）」面板：结构化变更列表（时间 / 映射 / 类型 / 详情），有新增/修改的行高亮，错误标红。
+- 自动刷新（默认每 5 秒，可关）+「刷新」按钮；可勾选「隐藏空闲」过滤每 5 分钟的心跳日志；可展开「查看原始日志」。
+- **有新变更时提醒**：面板出现红色「有新变更」角标 + 浏览器标签标题闪烁，点「知道了」消除。
+
 ---
 
 ## 三、关键约束（实测确认）
@@ -189,5 +195,4 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 以下功能**尚未实现或已暂停**，不要与已完成功能混淆：
 
 - **接口回调同步**（`POST /api/sync/notify`、`/api/sync/notify-batch`）— 已暂停（代码保留），改用轮巡，见 `docs/sync-lunXun.md`；
-- **Oracle 支持的后续完善** — 见 `docs/oracle-plan.md`；
 - **CDC 实时同步** — 已搁置（Oracle 10g 版本限制，详见 sync-feature-plan.md 补充章节）。

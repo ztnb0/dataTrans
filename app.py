@@ -1784,6 +1784,92 @@ def sync_status():
     return {'syncs': out}
 
 
+_SYNC_LOG_LINE_RE = re.compile(r'^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\]\s?(.*)$')
+
+
+def _tail_lines(path, n):
+    """读取文件末尾 n 行（按块倒读，避免整文件载入）"""
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 8192
+            data = b''
+            while size > 0 and data.count(b'\n') <= n:
+                read = min(block, size)
+                size -= read
+                f.seek(size)
+                data = f.read(read) + data
+    except Exception:
+        return []
+    return data.decode('utf-8', errors='replace').splitlines()[-n:]
+
+
+def _parse_sync_log_line(line):
+    """把一行 sync.log 解析为结构化事件（变更/对账/错误/空闲/信息）"""
+    m = _SYNC_LOG_LINE_RE.match(line)
+    ts = m.group(1) if m else ''
+    body = m.group(2) if m else line
+    e = {'time': ts, 'mapping': '', 'kind': 'info', 'created': 0, 'updated': 0,
+         'text': body, 'raw': line}
+    mm = re.match(r'^\[([^\]]+)\]\s*(.*)$', body)
+    inner = body
+    if mm:
+        e['mapping'] = mm.group(1)
+        inner = mm.group(2)
+    result = re.search(r'完成[：:]\s*新增\s*(\d+)\s*[，,]\s*修改\s*(\d+)', inner)
+    if result:
+        e['kind'] = 'result'
+        e['created'] = int(result.group(1))
+        e['updated'] = int(result.group(2))
+    elif ('对账完成' in inner) or inner.startswith('首次运行'):
+        e['kind'] = 'reconcile'
+    elif '修改 pk=' in inner:
+        e['kind'] = 'update'
+    elif ('失败' in inner) or ('异常' in inner):
+        e['kind'] = 'error'
+    elif ('跳过' in inner) or ('休眠' in inner) or ('轮巡线程已启动' in inner) \
+            or inner.startswith('开始一轮同步') or ('本轮同步结束' in inner):
+        e['kind'] = 'idle'
+    return e
+
+
+@app.get('/api/sync/log')
+def sync_log(lines: int = 100):
+    """读取 sync.log 末尾内容，返回结构化事件（供前端展示新增/修改）"""
+    try:
+        n = int(lines)
+    except (TypeError, ValueError):
+        n = 100
+    n = max(1, min(n, 2000))
+    if not os.path.exists(SYNC_LOG_PATH):
+        return {'entries': [], 'lines': [], 'lines_requested': n, 'mtime': None, 'size': 0,
+                'last_round': {'created': 0, 'updated': 0, 'errors': 0}, 'newest_change': None}
+    raw = _tail_lines(SYNC_LOG_PATH, n)
+    entries = [_parse_sync_log_line(l) for l in raw]
+    start = 0
+    for i, e in enumerate(entries):
+        if e['kind'] == 'idle' and e['text'].startswith('开始一轮同步'):
+            start = i
+    window = entries[start:]
+    created = sum(e['created'] for e in window if e['kind'] == 'result')
+    updated = sum(e['updated'] for e in window if e['kind'] == 'result')
+    errors = sum(1 for e in window if e['kind'] == 'error')
+    newest_change = None
+    for e in entries:
+        if e['kind'] == 'update' or (e['kind'] == 'result' and (e['created'] or e['updated'])):
+            newest_change = e
+    try:
+        st = os.stat(SYNC_LOG_PATH)
+        mtime = datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        size = st.st_size
+    except Exception:
+        mtime, size = None, 0
+    return {'entries': entries, 'lines': raw, 'lines_requested': n, 'mtime': mtime,
+            'size': size, 'last_round': {'created': created, 'updated': updated, 'errors': errors},
+            'newest_change': newest_change}
+
+
 class SyncResetRequest(BaseModel):
     mapping_id: str = ''
 

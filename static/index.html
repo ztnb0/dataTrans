@@ -163,6 +163,28 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
   <div class="preview" id="previewBox"><div class="hint">点击“预览源数据”查看源表前 5 条。</div></div>
 </div>
 
+<div class="panel" id="syncLogPanel" style="margin:0 24px 24px;">
+  <h2>⑤ 同步日志（sync.log）
+    <span id="syncLogBadge" style="display:none;background:#c53030;color:#fff;font-size:11px;padding:1px 8px;border-radius:10px;margin-left:8px;vertical-align:middle;">有新变更</span>
+    <button class="btn mini" id="syncLogAck" onclick="ackSyncLogAlert()" style="display:none;margin-left:6px;">知道了</button>
+    <span style="float:right;font-weight:400;">
+      <label style="display:inline-block;font-size:12px;color:#666;margin-right:10px;">
+        <input type="checkbox" id="syncLogAuto" checked onchange="toggleSyncLogAuto()" style="width:auto;margin:0 4px 0 0;vertical-align:middle;">自动刷新(5s)
+      </label>
+      <label style="display:inline-block;font-size:12px;color:#666;margin-right:10px;">
+        <input type="checkbox" id="syncLogHideIdle" checked onchange="renderSyncLog()" style="width:auto;margin:0 4px 0 0;vertical-align:middle;">隐藏空闲
+      </label>
+      <button class="btn mini" onclick="loadSyncLog()">刷新</button>
+    </span>
+  </h2>
+  <div id="syncLogSummary" class="summary">加载中…</div>
+  <div id="syncLogList" class="preview-scroll" style="max-height:360px;"></div>
+  <details style="margin-top:10px;">
+    <summary style="cursor:pointer;font-size:12px;color:#666;">查看原始日志</summary>
+    <div class="log" id="syncLogRaw" style="margin-top:8px;max-height:260px;">…</div>
+  </details>
+</div>
+
 <div class="modal-mask" id="sourceModal" style="display:none;" onclick="if(event.target===this)closeAddSource()">
   <div class="modal">
     <h2>添加数据源</h2>
@@ -262,6 +284,10 @@ async function init() {
   await loadAutoSyncStatus();
   await loadJdyFields();
   await loadAutoFillRules();
+  await loadSyncLog();
+  if ($('syncLogAuto') && $('syncLogAuto').checked) {
+    syncLogTimer = setInterval(loadSyncLog, SYNC_LOG_INTERVAL);
+  }
   $('jdyAppId').textContent = '598d1c563788a36bcba8a193 / 6aa0bbef65115c860c3a7bfd';
 }
 
@@ -1098,6 +1124,116 @@ async function loadJdyStats() {
 function log(msg) {
   const el = $('log');
   el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+}
+
+// ---------- 同步日志（sync.log） ----------
+let syncLogTimer = null;
+let syncLogData = { entries: [], lines: [], last_round: {}, newest_change: null };
+let syncLogChangeKey = null;    // 上一次已知的最新变更标识
+let syncLogInitialized = false; // 是否已完成首次加载（首次不提醒）
+let syncLogAlerting = false;
+let syncLogTitleTimer = null;
+const SYNC_LOG_INTERVAL = 5000;
+
+function syncLogFmtTime(t) { return t ? t.slice(11) : ''; }
+
+async function loadSyncLog() {
+  try {
+    const r = await fetch('/api/sync/log?lines=100').then(x => x.json());
+    syncLogData = r;
+    const nc = r.newest_change;
+    const key = nc ? (nc.time + '|' + nc.raw) : null;
+    if (syncLogInitialized && key && key !== syncLogChangeKey) {
+      triggerSyncLogAlert();
+    }
+    syncLogChangeKey = key;
+    syncLogInitialized = true;
+    renderSyncLog();
+  } catch (e) { /* 单次失败忽略，下次轮询重试 */ }
+}
+
+function renderSyncLog() {
+  const list = $('syncLogList');
+  const hideIdle = $('syncLogHideIdle') && $('syncLogHideIdle').checked;
+  const all = (syncLogData.entries || []).slice().reverse();   // 最新在上
+  const shown = hideIdle ? all.filter(e => e.kind !== 'idle') : all;
+  if (shown.length === 0) {
+    list.innerHTML = '<div class="hint" style="padding:10px;">暂无记录</div>';
+  } else {
+    let html = '<table><tr><th style="width:72px;">时间</th><th style="width:160px;">数据源/映射</th>'
+      + '<th style="width:64px;">类型</th><th>详情</th></tr>';
+    shown.forEach(e => { html += '<tr>' + syncLogCells(e) + '</tr>'; });
+    list.innerHTML = html + '</table>';
+  }
+  const lr = syncLogData.last_round || { created: 0, updated: 0, errors: 0 };
+  const nc = syncLogData.newest_change;
+  let html = '最近一轮：新增 <b style="color:#2f855a;">' + (lr.created || 0) + '</b>'
+    + '　修改 <b style="color:#2b6cb0;">' + (lr.updated || 0) + '</b>';
+  if ((lr.errors || 0) > 0) html += '　失败 <b style="color:#c53030;">' + lr.errors + '</b>';
+  html += '　｜　';
+  if (nc) {
+    html += '<span style="color:#2f855a;">最近变更：' + esc(syncLogFmtTime(nc.time)) + ' '
+      + esc(nc.mapping || '') + ' ' + esc(nc.text) + '</span>';
+  } else {
+    html += '<span style="color:#999;">窗口内无新增/修改</span>';
+  }
+  if (syncLogData.mtime) html += '　<span style="color:#999;">日志更新：' + esc(syncLogData.mtime) + '</span>';
+  $('syncLogSummary').innerHTML = html;
+  const rawEl = $('syncLogRaw');
+  if (rawEl) rawEl.textContent = (syncLogData.lines || []).join('\n');
+}
+
+function syncLogCells(e) {
+  const t = '<td>' + esc(syncLogFmtTime(e.time)) + '</td>';
+  const m = '<td>' + esc(e.mapping || '') + '</td>';
+  let label = '信息', color = '#718096';
+  if (e.kind === 'result') {
+    if (e.created || e.updated) { label = '变更'; color = '#2f855a'; }
+    else { label = '完成'; color = '#a0aec0'; }
+  } else if (e.kind === 'update') { label = '修改'; color = '#2b6cb0'; }
+  else if (e.kind === 'error') { label = '错误'; color = '#c53030'; }
+  else if (e.kind === 'reconcile') { label = '对账'; color = '#b7791f'; }
+  else if (e.kind === 'idle') { label = '空闲'; color = '#cbd5e0'; }
+  const k = '<td><span style="color:' + color + ';font-weight:600;">' + label + '</span></td>';
+  let text = esc(e.text);
+  if (e.kind === 'result' && (e.created || e.updated)) text = '<b style="color:#2f855a;">' + text + '</b>';
+  else if (e.kind === 'error') text = '<span style="color:#c53030;">' + text + '</span>';
+  return t + m + k + '<td>' + text + '</td>';
+}
+
+function triggerSyncLogAlert() {
+  syncLogAlerting = true;
+  const badge = $('syncLogBadge'); if (badge) badge.style.display = 'inline-block';
+  const ack = $('syncLogAck'); if (ack) ack.style.display = 'inline-block';
+  startSyncLogTitleFlash();
+}
+
+function startSyncLogTitleFlash() {
+  if (syncLogTitleTimer) return;
+  const base = '数据迁移工具';
+  let on = false;
+  syncLogTitleTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? '【有新变更】数据迁移工具' : base;
+  }, 1000);
+}
+
+function ackSyncLogAlert() {
+  syncLogAlerting = false;
+  if (syncLogTitleTimer) { clearInterval(syncLogTitleTimer); syncLogTitleTimer = null; }
+  document.title = '数据迁移工具';
+  const badge = $('syncLogBadge'); if (badge) badge.style.display = 'none';
+  const ack = $('syncLogAck'); if (ack) ack.style.display = 'none';
+}
+
+function toggleSyncLogAuto() {
+  const on = $('syncLogAuto').checked;
+  if (on) {
+    if (!syncLogTimer) syncLogTimer = setInterval(loadSyncLog, SYNC_LOG_INTERVAL);
+    loadSyncLog();
+  } else if (syncLogTimer) {
+    clearInterval(syncLogTimer); syncLogTimer = null;
+  }
 }
 
 // ---------- 映射管理 ----------
