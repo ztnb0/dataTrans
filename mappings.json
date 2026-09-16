@@ -17,7 +17,7 @@
       "_widget_1788918827862"
     ],
     "platform_value": "飞霞系统",
-    "data_type_value": "飞霞db_plan_positon @mexam3---飞霞",
+    "data_type_value": "飞霞",
     "transforms": [
       "",
       "batch_number",
@@ -153,6 +153,33 @@
     ],
     "platform_value": "教务系统",
     "data_type_value": "教务上海",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "enabled": true
+  },
+  {
+    "id": "dpt-182-coaching_class",
+    "source": "dpt-182",
+    "database": "dpt_product",
+    "table": "coaching_class",
+    "source_fields": [
+      "id",
+      "class_name",
+      "class_ctime",
+      "class_number"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827861",
+      "_widget_1788918827862",
+      "_widget_1788918827860"
+    ],
+    "platform_value": "测试平台",
+    "data_type_value": "测试班级",
     "transforms": [
       "",
       "",

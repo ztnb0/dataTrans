@@ -40,5 +40,15 @@
         "value": "飞霞"
       }
     ]
+  },
+  {
+    "source_name": "182测试数据库",
+    "platform": "测试平台",
+    "data_types": [
+      {
+        "match": "dpt_product",
+        "value": "测试班级"
+      }
+    ]
   }
 ]

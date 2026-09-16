@@ -6,6 +6,8 @@ import re
 import json
 import time
 import datetime
+import hashlib
+import threading
 import requests
 import pymysql
 from fastapi import FastAPI, HTTPException
@@ -20,6 +22,21 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 ENV_PATH = os.path.join(BASE_DIR, '.env')
 MAPPINGS_PATH = os.path.join(BASE_DIR, 'mappings.json')
 AUTO_FILL_RULES_PATH = os.path.join(BASE_DIR, 'auto_fill_rules.json')
+SYNC_STATE_PATH = os.path.join(BASE_DIR, 'sync_state.json')
+SYNC_LOG_PATH = os.path.join(BASE_DIR, 'sync.log')
+
+# ---------- 轮巡配置 ----------
+SYNC_INTERVAL = 300      # 轮巡间隔（秒），默认 5 分钟
+SYNC_OFF_START = 20      # 休眠开始时刻（时），含 20:00
+SYNC_OFF_END = 8         # 休眠结束时刻（时），次日 08:00 恢复
+SYNC_TIME_FROM = '2026'  # 时间筛选：只同步该年份及之后的数据
+SYNC_LOCK = threading.Lock()
+
+# 自动同步开关（前端按钮控制，内存态，重启后默认关闭）
+#   all:     是否全部数据源自动同步
+#   sources: {数据源id: 是否自动同步}，控制单个数据源
+AUTO_SYNC_LOCK = threading.Lock()
+AUTO_SYNC = {'all': False, 'sources': {}}
 
 
 def load_env():
@@ -655,15 +672,16 @@ def _jdy_widgets():
 
 
 @app.get('/api/jdy/preview')
-def jdy_preview(limit: int = 20):
-    """预览简道云表单已有数据（表格形式）"""
+def jdy_preview(limit: int = 50, skip: int = 0):
+    """预览简道云表单已有数据（分页表格）"""
     widgets = _jdy_widgets()
     names = [w['name'] for w in widgets]
     labels = [w['label'] for w in widgets]
     r = requests.post(JDY_BASE + '/app/entry/data/list', headers=JDY_HEADERS,
                       data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
-                                   'limit': limit, 'fields': names, 'filter': {}, 'sort': []}),
-                      timeout=30)
+                                   'limit': limit, 'skip': skip,
+                                   'fields': names, 'filter': {}, 'sort': []}),
+                      timeout=60)
     if r.status_code != 200:
         raise HTTPException(500, '简道云数据查询失败: %s' % r.text)
     data = r.json().get('data', [])
@@ -671,7 +689,42 @@ def jdy_preview(limit: int = 20):
     for d in data:
         row = [d.get(n, '') for n in names]
         rows.append([('' if v is None else (v if isinstance(v, str) else str(v))) for v in row])
-    return {'columns': labels, 'rows': rows}
+    return {'columns': labels, 'rows': rows, 'skip': skip, 'limit': limit}
+
+
+@app.get('/api/jdy/stats')
+def jdy_stats():
+    """统计简道云表单各平台的数据条数（全量拉取平台字段后分组计数）"""
+    counts = {}
+    total = 0
+    skip = 0
+    limit = 100
+    guard = 0
+    while True:
+        r = requests.post(JDY_BASE + '/app/entry/data/list', headers=JDY_HEADERS,
+                          data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
+                                       'limit': limit, 'skip': skip,
+                                       'fields': [JDY_PLATFORM_KEY],
+                                       'filter': {}, 'sort': []}),
+                          timeout=60)
+        if r.status_code != 200:
+            raise HTTPException(500, '简道云数据查询失败: %s' % r.text)
+        data = r.json().get('data', [])
+        if not data:
+            break
+        for d in data:
+            p = d.get(JDY_PLATFORM_KEY)
+            p = p if p not in (None, '') else '（未填平台）'
+            counts[p] = counts.get(p, 0) + 1
+            total += 1
+        if len(data) < limit:
+            break
+        skip += limit
+        guard += 1
+        if guard > 500:
+            break
+    platforms = sorted(counts.items(), key=lambda x: -x[1])
+    return {'total': total, 'platforms': [{'platform': p, 'count': c} for p, c in platforms]}
 
 
 def _read_rows(req, exclude=False):
@@ -866,7 +919,7 @@ def transfer_preview(req: TransferRequest):
 
 @app.post('/api/transfer')
 def transfer(req: TransferRequest):
-    """真正写入简道云（可带时间筛选 + 排除勾选）"""
+    """真正写入简道云（查重覆盖：已存在则 update，不存在则 batch_create）"""
     if not req.source_fields or not req.target_fields:
         raise HTTPException(400, '请先配置字段映射')
     if len(req.source_fields) != len(req.target_fields):
@@ -881,46 +934,68 @@ def transfer(req: TransferRequest):
 
     col_index = {name: idx for idx, name in enumerate(fields)}
     n_fields = len(req.target_fields)
+    pk_col = get_primary_key(req.source, req.database, req.table)
+    pk_idx = col_index.get(pk_col)
+
     success = 0
     fail = 0
+    updated = 0
     errors = []
 
-    for i in range(0, total, JDY_BATCH_SIZE):
-        batch = kept[i:i + JDY_BATCH_SIZE]
-        data_list = []
-        for row, transformed in batch:
-            rec = {}
-            for j in range(n_fields):
-                rec[req.target_fields[j]] = normalize_value(transformed[j])
-            if time_field:
-                rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
-            if req.platform_value:
-                rec[JDY_PLATFORM_KEY] = {'value': req.platform_value}
-            if req.data_type_value:
-                rec[JDY_DATA_TYPE_KEY] = {'value': req.data_type_value}
-            data_list.append(rec)
+    existing_map = jdy_list_id_map(req.data_type_value) if req.data_type_value else {}
 
+    to_create = []
+    for row, transformed in kept:
+        rec = {}
+        for j in range(n_fields):
+            rec[req.target_fields[j]] = normalize_value(transformed[j])
+        if time_field:
+            rec[JDY_TIME_KEY] = normalize_value(_time_value(row[col_index[time_field]]))
+        if req.platform_value:
+            rec[JDY_PLATFORM_KEY] = {'value': req.platform_value}
+        if req.data_type_value:
+            rec[JDY_DATA_TYPE_KEY] = {'value': req.data_type_value}
+
+        pk_val = str(row[pk_idx]) if pk_idx is not None else ''
+        if pk_val:
+            rec[JDY_ID_KEY] = {'value': pk_val}
+        data_id = existing_map.get(pk_val) if pk_val else None
+        if data_id:
+            try:
+                jdy_update(data_id, rec)
+                updated += 1
+                success += 1
+            except HTTPException as e:
+                fail += 1
+                errors.append('更新 pk=%s 失败: %s' % (pk_val, e.detail))
+            time.sleep(0.05)
+        else:
+            to_create.append(rec)
+
+    for i in range(0, len(to_create), JDY_BATCH_SIZE):
+        chunk = to_create[i:i + JDY_BATCH_SIZE]
         r = requests.post(JDY_BASE + '/app/entry/data/batch_create', headers=JDY_HEADERS,
                           data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
-                                       'data_list': data_list}), timeout=60)
+                                       'data_list': chunk}), timeout=60)
         if r.status_code != 200:
-            fail += len(batch)
-            errors.append('批次 %d-%d 请求失败: %s' % (i + 1, i + len(batch), r.text))
+            fail += len(chunk)
+            errors.append('批次 %d-%d 请求失败: %s' % (i + 1, i + len(chunk), r.text))
             continue
         resp = r.json()
         ok = resp.get('success_count', 0)
         success += ok
-        f = len(batch) - ok
+        f = len(chunk) - ok
         if f > 0:
             fail += f
-            errors.append('批次 %d-%d 部分失败: %s' % (i + 1, i + len(batch), __json(resp)))
+            errors.append('批次 %d-%d 部分失败: %s' % (i + 1, i + len(chunk), __json(resp)))
         time.sleep(0.2)
 
     return {
         'success': success,
         'fail': fail,
         'total': total,
-        'message': '完成：成功 %d 条，失败 %d 条' % (success, fail),
+        'updated': updated,
+        'message': '完成：成功 %d 条（含覆盖 %d 条），失败 %d 条' % (success, updated, fail),
         'errors': errors[:20],
     }
 
@@ -1254,6 +1329,518 @@ def sync_notify_batch(req: NotifyBatchRequest):
                 results.append({'pk': pk, 'ok': False, 'reason': str(e.detail)})
 
     return {'ok': True, 'job': req.job, 'success': success, 'fail': fail, 'skipped': skipped, 'results': results}
+
+
+# ---------- 轮巡即时同步 ----------
+
+
+def load_sync_state():
+    if os.path.exists(SYNC_STATE_PATH):
+        try:
+            with open(SYNC_STATE_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_sync_state(state):
+    with open(SYNC_STATE_PATH, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def log_sync(msg):
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    line = '[%s] %s' % (ts, msg)
+    try:
+        with open(SYNC_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+    print(line)
+
+
+def in_sync_window(now=None):
+    """是否在轮巡时间段内：08:00 <= hour < 20:00"""
+    h = (now or datetime.datetime.now()).hour
+    return SYNC_OFF_END <= h < SYNC_OFF_START
+
+
+def seconds_until_next_window(now=None):
+    """休眠到下一个轮巡时间段起点（次日 08:00）的秒数"""
+    now = now or datetime.datetime.now()
+    nxt = (now + datetime.timedelta(days=1)).replace(
+        hour=SYNC_OFF_END, minute=0, second=0, microsecond=0)
+    return max(1.0, (nxt - now).total_seconds())
+
+
+def _pk_str(v):
+    return str(v)
+
+
+def _row_hash(values):
+    s = '\x1f'.join('' if v is None else str(v) for v in values)
+    return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+
+def mapping_time_field(mapping):
+    """从映射里找映射到 JDY_TIME_KEY 的源字段（即时间字段），找不到返回 None"""
+    for src, tgt in zip(mapping.get('source_fields', []), mapping.get('target_fields', [])):
+        if tgt == JDY_TIME_KEY:
+            return src
+    return None
+
+
+def _time_condition(mapping, time_field):
+    """返回 (cond, params)：时间字段 >= SYNC_TIME_FROM 的条件（不带 WHERE 前缀）"""
+    if not time_field:
+        return '', []
+    ident = oracle_ident if is_oracle(mapping['source']) else safe_ident
+    f = ident(time_field)
+    if is_oracle(mapping['source']):
+        return f + ' >= ' + str(int(_parse_start(SYNC_TIME_FROM).year)), []
+    return f + ' >= %s', [_parse_start(SYNC_TIME_FROM).strftime('%Y-%m-%d %H:%M:%S')]
+
+
+def _query_rows(src, database, table, fields, where='', params=None):
+    """读源表多行，返回 (col_index, rows)。col_index 按 fields 顺序，row 为 tuple。"""
+    ident = oracle_ident if is_oracle(src) else safe_ident
+    conn = get_conn(src)
+    try:
+        cur = conn.cursor()
+        sql = 'SELECT %s FROM %s.%s%s' % (
+            ','.join(ident(f) for f in fields), ident(database), ident(table), where)
+        cur.execute(sql, list(params or []))
+        rows = cur.fetchall()
+        return {name: i for i, name in enumerate(fields)}, rows
+    finally:
+        conn.close()
+
+
+def jdy_list_id_map(data_type_value):
+    """拉取简道云该数据类型下所有数据的 {源主键: data_id}"""
+    result = {}
+    cond = []
+    if data_type_value:
+        cond.append({'field': JDY_DATA_TYPE_KEY, 'type': 'text',
+                     'method': 'eq', 'value': [data_type_value]})
+    skip = 0
+    limit = 100
+    guard = 0
+    while True:
+        r = requests.post(JDY_BASE + '/app/entry/data/list', headers=JDY_HEADERS,
+                          data=__json({'app_id': JDY_APP_ID, 'entry_id': JDY_ENTRY_ID,
+                                       'limit': limit, 'skip': skip,
+                                       'fields': [JDY_ID_KEY],
+                                       'filter': {'rel': 'and', 'cond': cond},
+                                       'sort': []}), timeout=60)
+        if r.status_code != 200:
+            raise HTTPException(500, '简道云数据查询失败: %s' % r.text)
+        data = r.json().get('data', [])
+        if not data:
+            break
+        for d in data:
+            pk = d.get(JDY_ID_KEY)
+            data_id = d.get('_id') or d.get('data_id') or d.get('dataId')
+            if pk is not None and data_id:
+                result[str(pk)] = data_id
+        if len(data) < limit:
+            break
+        skip += limit
+        guard += 1
+        if guard > 500:
+            log_sync('简道云对账拉取超过 500 页，可能分页参数异常，中断拉取')
+            break
+    return result
+
+
+def _create_batch(mapping, rows, col_index, pk_idx, state_rows, existing_map=None):
+    """把源表行写入简道云：已存在则 update 覆盖，不存在则 batch_create。
+    existing_map 提供已知的 {主键: data_id}（对账时传入，避免重复查询）；为 None 时逐条查重。
+    返回 (created, updated)。"""
+    source_fields = mapping['source_fields']
+    data_type_value = mapping.get('data_type_value', '')
+    created = 0
+    updated = 0
+    records = []
+    for row in rows:
+        pk_val = _pk_str(row[pk_idx])
+        values = [row[col_index[f]] for f in source_fields]
+        h = _row_hash(values)
+        rec = build_jdy_record(mapping, row, col_index, pk_val)
+        if rec is None:
+            continue
+        data_id = None
+        if existing_map is not None:
+            data_id = existing_map.get(pk_val)
+        else:
+            data_id = jdy_find_by_id(pk_val, data_type_value)
+        if data_id:
+            try:
+                jdy_update(data_id, rec)
+                state_rows[pk_val] = {'data_id': data_id, 'hash': h}
+                updated += 1
+            except HTTPException as e:
+                log_sync('[%s] 覆盖 pk=%s 失败: %s' % (mapping.get('id'), pk_val, e.detail))
+            time.sleep(0.05)
+        else:
+            records.append((pk_val, h, rec))
+    for i in range(0, len(records), JDY_BATCH_SIZE):
+        chunk = records[i:i + JDY_BATCH_SIZE]
+        resp = jdy_batch_create([c[2] for c in chunk])
+        ok_ids = resp.get('success_ids') or []
+        for j, (pk_val, h, rec) in enumerate(chunk):
+            if j < len(ok_ids):
+                state_rows[pk_val] = {'data_id': ok_ids[j], 'hash': h}
+        ok = int(resp.get('success_count', 0) or 0)
+        created += ok
+        if ok < len(chunk):
+            log_sync('[%s] batch_create 部分失败：%d/%d 条' % (mapping.get('id'), ok, len(chunk)))
+        time.sleep(0.2)
+    return created, updated
+
+
+def _reconcile(mapping, pk_col, fields, source_fields):
+    """首次对账：接管简道云已有数据 + 补新增，返回该映射的 state"""
+    src = mapping['source']
+    database = mapping['database']
+    table = mapping['table']
+    data_type_value = mapping.get('data_type_value', '')
+
+    jdy_map = jdy_list_id_map(data_type_value)
+
+    time_field = mapping_time_field(mapping)
+    cond, cparams = _time_condition(mapping, time_field)
+    where = (' WHERE ' + cond) if cond else ''
+    col_index, rows = _query_rows(src, database, table, fields, where, cparams)
+    pk_idx = col_index[pk_col]
+
+    state_rows = {}
+    to_create = []
+    max_id = 0
+    for row in rows:
+        pk_val = _pk_str(row[pk_idx])
+        values = [row[col_index[f]] for f in source_fields]
+        h = _row_hash(values)
+        try:
+            n = int(pk_val)
+        except (ValueError, TypeError):
+            n = 0
+        if n > max_id:
+            max_id = n
+        if pk_val in jdy_map:
+            state_rows[pk_val] = {'data_id': jdy_map[pk_val], 'hash': h}
+        else:
+            to_create.append(row)
+
+    created, _ = _create_batch(mapping, to_create, col_index, pk_idx, state_rows, existing_map=jdy_map)
+    reconciled = len(state_rows) - created
+
+    return {
+        'max_id': max_id,
+        'rows': state_rows,
+        'last_sync_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'reconciled': reconciled,
+        'created': created,
+    }
+
+
+def _query_new_rows(mapping, fields, pk_col, max_id, time_field=''):
+    src = mapping['source']
+    database = mapping['database']
+    table = mapping['table']
+    ident = oracle_ident if is_oracle(src) else safe_ident
+    cond, cparams = _time_condition(mapping, time_field)
+    conn = get_conn(src)
+    try:
+        cur = conn.cursor()
+        col_list = ','.join(ident(f) for f in fields)
+        if is_oracle(src):
+            sql = 'SELECT %s FROM %s.%s WHERE %s > :1' % (
+                col_list, ident(database), ident(table), ident(pk_col))
+            params = [max_id]
+            if cond:
+                sql += ' AND ' + cond
+            cur.execute(sql, params)
+        else:
+            sql = 'SELECT %s FROM %s.%s WHERE %s > %%s' % (
+                col_list, ident(database), ident(table), ident(pk_col))
+            params = [max_id]
+            if cond:
+                sql += ' AND ' + cond
+                params += cparams
+            cur.execute(sql, params)
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _update_by_hash(mapping, fields, col_index, pk_idx, rows_map):
+    src = mapping['source']
+    database = mapping['database']
+    table = mapping['table']
+    time_field = mapping_time_field(mapping)
+    cond, cparams = _time_condition(mapping, time_field)
+    where = (' WHERE ' + cond) if cond else ''
+    _, rows = _query_rows(src, database, table, fields, where, cparams)
+
+    updated = 0
+    missing = []
+    for row in rows:
+        pk_val = _pk_str(row[pk_idx])
+        entry = rows_map.get(pk_val)
+        if not entry:
+            missing.append(row)
+            continue
+        values = [row[col_index[f]] for f in mapping['source_fields']]
+        h = _row_hash(values)
+        if h == entry['hash']:
+            continue
+        rec = build_jdy_record(mapping, row, col_index, pk_val)
+        if rec is None:
+            continue
+        try:
+            jdy_update(entry['data_id'], rec)
+        except HTTPException as e:
+            log_sync('[%s] 更新 pk=%s 失败: %s' % (mapping.get('id'), pk_val, e.detail))
+            continue
+        entry['hash'] = h
+        updated += 1
+        detail = ', '.join('%s=%s' % (f, to_display(row[col_index[f]]))
+                           for f in mapping['source_fields'])
+        log_sync('[%s] 修改 pk=%s：%s' % (mapping.get('id'), pk_val, detail))
+        time.sleep(0.05)
+
+    created = 0
+    if missing:
+        created, _ = _create_batch(mapping, missing, col_index, pk_idx, rows_map, existing_map=None)
+    return updated, created
+
+
+def run_one_mapping(mapping):
+    """对单套映射执行一轮同步，返回统计结果"""
+    mid = mapping.get('id')
+    src = mapping['source']
+    database = mapping['database']
+    table = mapping['table']
+    pk_col = get_primary_key(src, database, table)
+    source_fields = list(mapping['source_fields'])
+
+    fields = list(source_fields)
+    if pk_col not in fields:
+        fields.append(pk_col)
+
+    state = load_sync_state()
+    st = state.get(mid)
+
+    if not st or st.get('max_id') is None:
+        log_sync('[%s] 首次运行，开始对账' % mid)
+        st = _reconcile(mapping, pk_col, fields, source_fields)
+        state[mid] = st
+        save_sync_state(state)
+        log_sync('[%s] 对账完成：接管 %d 条，新增 %d 条，max_id=%s' % (
+            mid, st.get('reconciled', 0), st.get('created', 0), st.get('max_id')))
+        return {'id': mid, 'created': st.get('created', 0), 'updated': 0,
+                'reconciled': st.get('reconciled', 0), 'first_sync': True}
+
+    rows_map = st.get('rows', {})
+    max_id = st.get('max_id') or 0
+
+    col_index = {name: i for i, name in enumerate(fields)}
+    pk_idx = col_index[pk_col]
+
+    created = 0
+    updated = 0
+
+    time_field = mapping_time_field(mapping)
+
+    new_rows = _query_new_rows(mapping, fields, pk_col, max_id, time_field)
+    if new_rows:
+        c, u = _create_batch(mapping, new_rows, col_index, pk_idx, rows_map, existing_map=None)
+        created += c
+        updated += u
+        for row in new_rows:
+            try:
+                n = int(row[pk_idx])
+            except (ValueError, TypeError):
+                continue
+            if n > max_id:
+                max_id = n
+
+    u, c = _update_by_hash(mapping, fields, col_index, pk_idx, rows_map)
+    updated += u
+    created += c
+
+    st['max_id'] = max_id
+    st['rows'] = rows_map
+    st['last_sync_time'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    state[mid] = st
+    save_sync_state(state)
+
+    log_sync('[%s] 完成：新增 %d，修改 %d' % (mid, created, updated))
+    return {'id': mid, 'created': created, 'updated': updated}
+
+
+def run_mappings(mappings):
+    log_sync('开始一轮同步，共 %d 套映射' % len(mappings))
+    results = []
+    for m in mappings:
+        try:
+            results.append(run_one_mapping(m))
+        except Exception as e:
+            log_sync('[%s] 同步失败: %s' % (m.get('id'), e))
+            results.append({'id': m.get('id'), 'error': str(e)})
+    log_sync('本轮同步结束')
+    return results
+
+
+def run_all_sync():
+    mappings = [m for m in load_mappings() if m.get('enabled', True)]
+    return run_mappings(mappings)
+
+
+def get_auto_sync_state():
+    with AUTO_SYNC_LOCK:
+        return {'all': AUTO_SYNC['all'], 'sources': dict(AUTO_SYNC['sources'])}
+
+
+def toggle_auto_sync(mode, source=''):
+    with AUTO_SYNC_LOCK:
+        if mode == 'all':
+            AUTO_SYNC['all'] = not AUTO_SYNC['all']
+        else:
+            AUTO_SYNC['sources'][source] = not AUTO_SYNC['sources'].get(source, False)
+        return {'all': AUTO_SYNC['all'], 'sources': dict(AUTO_SYNC['sources'])}
+
+
+def _mappings_to_run():
+    mappings = [m for m in load_mappings() if m.get('enabled', True)]
+    st = get_auto_sync_state()
+    if st['all']:
+        return mappings
+    return [m for m in mappings if st['sources'].get(m.get('source'), False)]
+
+
+def sync_loop():
+    while True:
+        try:
+            if in_sync_window():
+                targets = _mappings_to_run()
+                if targets:
+                    with SYNC_LOCK:
+                        run_mappings(targets)
+                else:
+                    log_sync('本轮无开启自动同步的数据源，跳过')
+                time.sleep(SYNC_INTERVAL)
+            else:
+                secs = seconds_until_next_window()
+                log_sync('休眠时间段，睡 %.0f 秒至次日 08:00' % secs)
+                time.sleep(secs)
+        except Exception as e:
+            log_sync('轮巡异常: %s' % e)
+            time.sleep(SYNC_INTERVAL)
+
+
+@app.on_event('startup')
+def start_sync_loop():
+    t = threading.Thread(target=sync_loop, daemon=True)
+    t.start()
+    log_sync('轮巡线程已启动（间隔 %d 秒，%02d:00~%02d:00 休眠；默认不自动同步，由前端按钮开启）' % (
+        SYNC_INTERVAL, SYNC_OFF_START, SYNC_OFF_END))
+
+
+class SyncRunRequest(BaseModel):
+    mapping_id: Optional[str] = ''
+
+
+@app.post('/api/sync/run')
+def sync_run(req: SyncRunRequest):
+    mid = (req.mapping_id or '').strip()
+    with SYNC_LOCK:
+        if mid:
+            mapping = next((m for m in load_mappings() if m.get('id') == mid), None)
+            if not mapping:
+                raise HTTPException(404, '映射不存在: %s' % mid)
+            return {'ok': True, 'result': run_one_mapping(mapping)}
+        return {'ok': True, 'result': run_all_sync()}
+
+
+@app.get('/api/sync/status')
+def sync_status():
+    state = load_sync_state()
+    out = []
+    for m in load_mappings():
+        st = state.get(m.get('id'))
+        out.append({
+            'id': m.get('id'),
+            'table': m.get('table'),
+            'database': m.get('database'),
+            'data_type': m.get('data_type_value'),
+            'enabled': m.get('enabled', True),
+            'max_id': st.get('max_id') if st else None,
+            'last_sync_time': st.get('last_sync_time') if st else None,
+            'rows': len(st.get('rows', {})) if st else 0,
+        })
+    return {'syncs': out}
+
+
+class SyncResetRequest(BaseModel):
+    mapping_id: str = ''
+
+
+@app.post('/api/sync/reset')
+def sync_reset(req: SyncResetRequest):
+    mid = (req.mapping_id or '').strip()
+    if not mid:
+        raise HTTPException(400, '需要 mapping_id')
+    with SYNC_LOCK:
+        state = load_sync_state()
+        existed = mid in state
+        if existed:
+            del state[mid]
+            save_sync_state(state)
+    log_sync('[%s] 已重置同步状态（下次同步将重新对账）' % mid)
+    return {'ok': True, 'reset': mid, 'existed': existed}
+
+
+class AutoSyncToggleRequest(BaseModel):
+    mode: str = 'single'          # 'single' | 'all'
+    source: Optional[str] = ''
+
+
+@app.get('/api/sync/auto/status')
+def sync_auto_status():
+    return get_auto_sync_state()
+
+
+@app.post('/api/sync/auto/toggle')
+def sync_auto_toggle(req: AutoSyncToggleRequest):
+    if req.mode not in ('single', 'all'):
+        raise HTTPException(400, 'mode 只能是 single 或 all')
+    if req.mode == 'single' and not req.source:
+        raise HTTPException(400, 'single 模式需要 source')
+
+    src = req.source or ''
+    cur = get_auto_sync_state()
+    will_on = not (cur['all'] if req.mode == 'all' else cur['sources'].get(src, False))
+
+    if will_on and not in_sync_window():
+        raise HTTPException(400, '不在同步时间范围内（同步时间：08:00 ~ 20:00）')
+
+    state = toggle_auto_sync(req.mode, src)
+
+    result = None
+    if will_on:
+        with SYNC_LOCK:
+            if req.mode == 'all':
+                result = run_all_sync()
+            else:
+                mappings = [m for m in load_mappings()
+                            if m.get('enabled', True) and m.get('source') == src]
+                result = run_mappings(mappings)
+
+    return {'all': state['all'], 'sources': state['sources'],
+            'turned_on': will_on, 'synced': result}
 
 
 app.mount('/', StaticFiles(directory='static', html=True), name='static')

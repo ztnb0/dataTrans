@@ -108,8 +108,11 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
     <label>选择要传输的字段（勾选）</label>
     <div class="field-list" id="dbFields"></div>
 
-    <div style="margin-top:12px;">
+    <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;">
       <button class="btn gray" onclick="previewData()">预览源数据</button>
+      <button class="btn" id="btnAutoSingle" onclick="toggleAutoSync('single')">单源同步</button>
+      <button class="btn" id="btnAutoAll" onclick="toggleAutoSync('all')">全部同步</button>
+      <button class="btn gray" onclick="resetSyncState()">重置同步</button>
     </div>
   </div>
 
@@ -256,6 +259,7 @@ let autoFillRules = [];
 
 async function init() {
   await loadSources();
+  await loadAutoSyncStatus();
   await loadJdyFields();
   await loadAutoFillRules();
   $('jdyAppId').textContent = '598d1c563788a36bcba8a193 / 6aa0bbef65115c860c3a7bfd';
@@ -308,6 +312,7 @@ function renderSourceDrop() {
       currentSourceType = s ? (s.type || 'mysql') : 'mysql';
       currentSourceSchemas = s ? (s.schemas || []) : [];
       dd.style.display = 'none';
+      renderAutoSyncButtons();
       loadDatabases();
     };
   });
@@ -520,6 +525,7 @@ async function loadColumns() {
   });
   currentTimeField = '';
   updateTimeFilterUI();
+  await autoLoadMapping();
 }
 
 // ---------- 可搜索下拉 ----------
@@ -706,6 +712,36 @@ function rebuildMapping() {
   updateTimeFilterUI();
 }
 
+// 选完数据源/库/表后，按已保存映射自动勾选字段并填充映射面板
+async function autoLoadMapping() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  if (!currentSourceId || !db || !table) return;
+  let m = null;
+  try {
+    const r = await fetch('/api/mappings').then(x => x.json());
+    m = (r.mappings || []).find(x =>
+      x.source === currentSourceId && x.database === db && x.table === table && x.enabled !== false) || null;
+  } catch (e) { m = null; }
+  if (!m || !m.source_fields || !m.source_fields.length) return;
+  if (!jdyWidgets.length) {
+    try { await loadJdyFields(); } catch (e) {}
+  }
+
+  document.querySelectorAll('#dbFields .field-item input[type=checkbox]').forEach(cb => {
+    cb.checked = m.source_fields.includes(cb.value);
+  });
+  rebuildMapping();
+  const rows = [...document.querySelectorAll('#mappingList .map-row')];
+  rows.forEach((r, i) => {
+    if (m.target_fields && m.target_fields[i]) r.querySelector('.target-sel').value = m.target_fields[i];
+    const t = r.querySelector('.transform-sel');
+    if (t && m.transforms && m.transforms[i]) t.value = m.transforms[i];
+  });
+  if (m.platform_value) $('platformValue').value = m.platform_value;
+  if (m.data_type_value) $('dataTypeValue').value = m.data_type_value;
+  log('已按映射自动勾选字段：' + m.table);
+}
+
 function curSourceName() {
   const s = sourceList.find(x => x.id === currentSourceId);
   return s ? (s.name || '') : '';
@@ -716,14 +752,14 @@ function applyAutoDefaults() {
   const db = $('db').value.trim();
   const table = $('table').value.trim();
   const rule = autoFillRules.find(r => r.source_name === sname);
-  if (rule && rule.platform) $('platformValue').value = rule.platform;
+  $('platformValue').value = (rule && rule.platform) ? rule.platform : '';
   let dt = '';
   if (rule) {
     for (const d of (rule.data_types || [])) {
       if (d.match === db || d.match === table) { dt = d.value; break; }
     }
   }
-  if (dt) $('dataTypeValue').value = dt;
+  $('dataTypeValue').value = dt;
 }
 
 async function saveMapping() {
@@ -999,12 +1035,25 @@ async function confirmTransfer() {
 }
 
 // 查看简道云表单已有数据
+let jdyPage = 0;
+let jdyPageSize = 50;
+let jdyStatsHtml = '';
+
 async function viewJdyData() {
+  jdyPage = 0;
+  jdyStatsHtml = '';
+  await loadJdyPage();
+  loadJdyStats();
+}
+
+async function loadJdyPage() {
   const box = $('jdyResult');
   box.innerHTML = '<div class="hint">加载中…</div>';
   try {
-    const r = await fetch('/api/jdy/preview?limit=50').then(x => x.json());
-    let html = '<div class="summary">简道云表单已有数据（最近 ' + r.rows.length + ' 条）</div>';
+    const skip = jdyPage * jdyPageSize;
+    const r = await fetch('/api/jdy/preview?limit=' + jdyPageSize + '&skip=' + skip).then(x => x.json());
+    let html = '<div id="jdyStatsBox" class="hint" style="margin-bottom:6px;">' + (jdyStatsHtml || '平台统计加载中…') + '</div>';
+    html += '<div class="summary">简道云表单已有数据（第 ' + (jdyPage + 1) + ' 页，每页 ' + jdyPageSize + ' 条）</div>';
     html += '<div class="preview-scroll"><table><tr>';
     r.columns.forEach(c => { html += '<th>' + c + '</th>'; });
     html += '</tr>';
@@ -1012,9 +1061,37 @@ async function viewJdyData() {
       html += '<tr>' + row.map(v => '<td title="' + String(v).replace(/"/g, '&quot;') + '">' + v + '</td>').join('') + '</tr>';
     });
     html += '</table></div>';
+    const hasMore = r.rows.length >= jdyPageSize;
+    html += '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">'
+      + '<button class="btn mini" onclick="jdyPrevPage()"' + (jdyPage === 0 ? ' disabled' : '') + '>上一页</button>'
+      + '<span style="font-size:13px;">第 ' + (jdyPage + 1) + ' 页</span>'
+      + '<button class="btn mini" onclick="jdyNextPage()"' + (hasMore ? '' : ' disabled') + '>下一页</button>'
+      + '</div>';
     box.innerHTML = html;
   } catch (e) {
     box.innerHTML = '<div class="hint">加载失败：' + e.message + '</div>';
+  }
+}
+
+function jdyPrevPage() { if (jdyPage > 0) { jdyPage--; loadJdyPage(); } }
+function jdyNextPage() { jdyPage++; loadJdyPage(); }
+
+async function loadJdyStats() {
+  try {
+    const r = await fetch('/api/jdy/stats').then(x => x.json());
+    const total = r.total || 0;
+    const platforms = r.platforms || [];
+    let html = '各平台数据条数（共 ' + total + ' 条）：';
+    html += platforms.length === 0
+      ? '暂无数据'
+      : platforms.map(s => s.platform + ' <b>' + s.count + '</b> 条').join('　');
+    jdyStatsHtml = html;
+    const st = $('jdyStatsBox');
+    if (st) st.innerHTML = html;
+  } catch (e) {
+    jdyStatsHtml = '平台统计加载失败：' + e.message;
+    const st = $('jdyStatsBox');
+    if (st) st.innerHTML = jdyStatsHtml;
   }
 }
 
@@ -1140,6 +1217,130 @@ async function saveRules() {
   autoFillRules = ruleMgrData;
   closeRuleManager();
   log('规则已保存');
+}
+
+// ---------- 自动同步开关（单源 / 全部） ----------
+let autoSyncState = { all: false, sources: {} };
+
+async function loadAutoSyncStatus() {
+  try {
+    const r = await fetch('/api/sync/auto/status').then(x => x.json());
+    autoSyncState = r;
+  } catch (e) {
+    autoSyncState = { all: false, sources: {} };
+  }
+  renderAutoSyncButtons();
+}
+
+function renderAutoSyncButtons() {
+  const singleOn = !!(autoSyncState.sources && autoSyncState.sources[currentSourceId]);
+  const allOn = !!autoSyncState.all;
+  const b1 = $('btnAutoSingle'), b2 = $('btnAutoAll');
+  if (b1) {
+    b1.textContent = singleOn ? '单源暂停' : '单源同步';
+    b1.className = 'btn ' + (singleOn ? 'red' : 'green');
+  }
+  if (b2) {
+    b2.textContent = allOn ? '全部暂停' : '全部同步';
+    b2.className = 'btn ' + (allOn ? 'red' : 'green');
+  }
+}
+
+async function toggleAutoSync(mode) {
+  const willOn = mode === 'all' ? !autoSyncState.all : !(autoSyncState.sources && autoSyncState.sources[currentSourceId]);
+
+  if (willOn) {
+    const h = new Date().getHours();
+    if (h >= 20 || h < 8) {
+      alert('不在同步时间范围内（同步时间：08:00 ~ 20:00）');
+      return;
+    }
+    let mappings = [];
+    try {
+      const r = await fetch('/api/mappings').then(x => x.json());
+      mappings = (r.mappings || []).filter(m => m.enabled !== false);
+    } catch (e) { mappings = []; }
+    if (mode === 'single') {
+      if (!mappings.some(m => m.source === currentSourceId)) {
+        alert('当前数据源还没有保存映射，请先勾选字段并点「保存映射」后再同步');
+        return;
+      }
+    } else {
+      if (mappings.length === 0) {
+        alert('还没有保存任何映射，请先保存映射后再同步');
+        return;
+      }
+    }
+  }
+
+  const body = mode === 'all' ? { mode: 'all' } : { mode: 'single', source: currentSourceId };
+  const b1 = $('btnAutoSingle'), b2 = $('btnAutoAll');
+  if (willOn) {
+    b1.disabled = true; b2.disabled = true;
+    log((mode === 'all' ? '开启全部自动同步' : '开启「' + currentSourceId + '」自动同步') + '，正在立即同步一次…（首次对账可能较慢）');
+  }
+  try {
+    const resp = await fetch('/api/sync/auto/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const r = await resp.json();
+    if (!resp.ok) { alert('操作失败：' + (r.detail || JSON.stringify(r))); return; }
+    autoSyncState = r;
+    renderAutoSyncButtons();
+    const name = mode === 'all' ? '全部数据源' : '「' + currentSourceId + '」';
+    if (r.turned_on) {
+      let created = 0, updated = 0, errors = 0, reconciled = 0, first = false;
+      (Array.isArray(r.synced) ? r.synced : [r.synced]).forEach(x => {
+        if (!x) return;
+        if (x.error) { errors++; }
+        else {
+          created += (x.created || 0);
+          updated += (x.updated || 0);
+          if (x.first_sync) { first = true; reconciled += (x.reconciled || 0); }
+        }
+      });
+      let msg = name + '已开启自动同步';
+      if (first) { msg += '，首次对账：接管 ' + reconciled + '，新增 ' + created; }
+      else { msg += '，本次同步：新增 ' + created + '，修改 ' + updated; }
+      if (errors) { msg += '，失败 ' + errors; }
+      log(msg);
+    } else {
+      log('已暂停 ' + name + ' 自动同步');
+    }
+  } catch (e) {
+    alert('操作失败：' + e.message);
+  } finally {
+    b1.disabled = false; b2.disabled = false;
+  }
+}
+
+async function resetSyncState() {
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  if (!db || !table) { alert('请先选择数据库和表'); return; }
+  const mappingId = currentSourceType === 'oracle'
+    ? currentSourceId + '-' + db + '-' + table
+    : currentSourceId + '-' + table;
+  if (!confirm('确认重置「' + table + '」的同步状态？\n重置后下次同步会重新对账，并把数据全量写入简道云。')) return;
+  try {
+    const resp = await fetch('/api/sync/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mapping_id: mappingId })
+    });
+    const r = await resp.json();
+    if (!resp.ok) { alert('重置失败：' + (r.detail || JSON.stringify(r))); return; }
+    if (r.existed) {
+      log('已重置「' + table + '」的同步状态（下次同步将重新对账）');
+      alert('已重置「' + table + '」的同步状态');
+    } else {
+      log('「' + table + '」本来就没有同步状态，无需重置');
+      alert('「' + table + '」当前没有同步状态（未同步过），无需重置');
+    }
+  } catch (e) {
+    alert('重置失败：' + e.message);
+  }
 }
 
 init();
