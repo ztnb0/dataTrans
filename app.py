@@ -10,7 +10,7 @@ import requests
 import pymysql
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -19,6 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 ENV_PATH = os.path.join(BASE_DIR, '.env')
 MAPPINGS_PATH = os.path.join(BASE_DIR, 'mappings.json')
+AUTO_FILL_RULES_PATH = os.path.join(BASE_DIR, 'auto_fill_rules.json')
 
 
 def load_env():
@@ -368,8 +369,7 @@ def normalize_value(val):
     if val is None:
         return {'value': ''}
     if isinstance(val, datetime.datetime):
-        utc = val - datetime.timedelta(hours=8)
-        return {'value': utc.strftime('%Y-%m-%dT%H:%M:%S.000Z')}
+        return {'value': val.strftime('%Y-%m-%d %H:%M:%S')}
     if isinstance(val, datetime.date):
         return {'value': val.strftime('%Y-%m-%d')}
     if isinstance(val, bytes):
@@ -447,6 +447,14 @@ def list_sources():
                         for s in SOURCES.values()]}
 
 
+@app.get('/api/sources/{source_id}')
+def get_source_detail(source_id: str):
+    """返回单个数据源完整信息（不含密码）"""
+    if source_id not in SOURCES:
+        raise HTTPException(404, '数据源不存在: %s' % source_id)
+    return SOURCES[source_id]
+
+
 def _build_source_dict(req):
     """SourceRequest -> source dict（不含 id、user_added）"""
     s = {
@@ -512,13 +520,43 @@ def add_source(req: SourceRequest):
                        'schemas': s.get('schemas', []), 'user_added': True}}
 
 
-@app.delete('/api/sources/{source_id}')
-def delete_source(source_id: str):
-    """删除数据源（仅限用户新增的）"""
+@app.put('/api/sources/{source_id}')
+def update_source(source_id: str, req: SourceRequest):
+    """修改数据源（含改名等），密码留空则保留原密码"""
     if source_id not in SOURCES:
         raise HTTPException(404, '数据源不存在: %s' % source_id)
-    if not SOURCES[source_id].get('user_added'):
-        raise HTTPException(400, '内置数据源不允许删除')
+    req.type = req.type.lower().strip()
+    if req.type not in ('mysql', 'oracle'):
+        raise HTTPException(400, 'type 只支持 mysql 或 oracle')
+    if not (req.name and req.name.strip()):
+        raise HTTPException(400, '名称不能为空')
+    if not (req.host and req.host.strip()):
+        raise HTTPException(400, '主机不能为空')
+    if not (req.user and req.user.strip()):
+        raise HTTPException(400, '用户名不能为空')
+    if not req.port:
+        req.port = 3306 if req.type == 'mysql' else 1521
+
+    old = SOURCES[source_id]
+    s = _build_source_dict(req)
+    password = (s.pop('password', '') or '').strip()
+    s['id'] = source_id
+    s['user_added'] = old.get('user_added', False)
+
+    SOURCES[source_id] = s
+    save_config()
+    if password:
+        save_env_password(source_id, password)
+
+    return {'source': {'id': source_id, 'name': s['name'], 'type': s['type'],
+                       'schemas': s.get('schemas', []), 'user_added': bool(s.get('user_added'))}}
+
+
+@app.delete('/api/sources/{source_id}')
+def delete_source(source_id: str):
+    """删除数据源（含内置）"""
+    if source_id not in SOURCES:
+        raise HTTPException(404, '数据源不存在: %s' % source_id)
     del SOURCES[source_id]
     save_config()
     delete_env_password(source_id)
@@ -764,9 +802,9 @@ def _transform_and_filter_rows(req, fields, rows, has_schema):
         transformed = []
         skip = False
         for j, src in enumerate(req.source_fields):
-            val = apply_transform(row[col_index[src]],
-                                  transforms[j] if j < len(transforms) else None)
-            if val is None:
+            tt = transforms[j] if j < len(transforms) else None
+            val = apply_transform(row[col_index[src]], tt)
+            if tt and val is None:
                 skip = True
                 break
             transformed.append(val)
@@ -914,16 +952,32 @@ class MappingRequest(BaseModel):
     target_fields: List[str]
     platform_value: Optional[str] = ''
     data_type_value: Optional[str] = ''
+    transforms: Optional[List[str]] = None
     enabled: Optional[bool] = True
 
 
 class NotifyRequest(BaseModel):
     table: str
     pk: str
+    database: Optional[str] = ''
+
+    @field_validator('pk', mode='before')
+    @classmethod
+    def _pk_to_str(cls, v):
+        return str(v)
 
 
-def find_mapping_by_table(table):
+class NotifyBatchRequest(BaseModel):
+    table: str
+    database: Optional[str] = ''
+    job: int = 1
+    rows: List[dict]
+
+
+def find_mapping_by_table(table, database=''):
     matches = [m for m in load_mappings() if m.get('table') == table and m.get('enabled', True)]
+    if database:
+        matches = [m for m in matches if m.get('database', '') == database]
     if not matches:
         raise HTTPException(400, '表 %s 未配置映射' % table)
     if len(matches) > 1:
@@ -967,8 +1021,36 @@ def build_jdy_record(mapping, row, col_index, pk_val):
         rec[JDY_DATA_TYPE_KEY] = {'value': mapping['data_type_value']}
     if mapping.get('platform_value'):
         rec[JDY_PLATFORM_KEY] = {'value': mapping['platform_value']}
-    for src, tgt in zip(mapping['source_fields'], mapping['target_fields']):
-        rec[tgt] = normalize_value(row[col_index[src]])
+    transforms = mapping.get('transforms') or []
+    for j, (src, tgt) in enumerate(zip(mapping['source_fields'], mapping['target_fields'])):
+        raw = row[col_index[src]]
+        tt = transforms[j] if j < len(transforms) else None
+        val = apply_transform(raw, tt)
+        if tt and val is None:
+            return None
+        rec[tgt] = normalize_value(val)
+    return rec
+
+
+def build_jdy_record_from_dict(mapping, row, pk, partial=False):
+    rec = {} if partial else {JDY_ID_KEY: {'value': str(pk)}}
+    if not partial:
+        if mapping.get('data_type_value'):
+            rec[JDY_DATA_TYPE_KEY] = {'value': mapping['data_type_value']}
+        if mapping.get('platform_value'):
+            rec[JDY_PLATFORM_KEY] = {'value': mapping['platform_value']}
+    transforms = mapping.get('transforms') or []
+    for j, (src, tgt) in enumerate(zip(mapping['source_fields'], mapping['target_fields'])):
+        if partial and src not in row:
+            continue
+        raw = row.get(src)
+        tt = transforms[j] if j < len(transforms) else None
+        val = apply_transform(raw, tt)
+        if tt and val is None:
+            if partial:
+                continue
+            return None
+        rec[tgt] = normalize_value(val)
     return rec
 
 
@@ -1015,6 +1097,14 @@ def list_mappings():
     return {'mappings': load_mappings()}
 
 
+@app.get('/api/mappings/{mapping_id}')
+def get_mapping_detail(mapping_id: str):
+    for m in load_mappings():
+        if m.get('id') == mapping_id:
+            return m
+    raise HTTPException(404, '映射不存在: %s' % mapping_id)
+
+
 @app.post('/api/mappings')
 def save_mapping(req: MappingRequest):
     m = req.model_dump()
@@ -1033,11 +1123,47 @@ def save_mapping(req: MappingRequest):
     return {'ok': True, 'mapping': m}
 
 
+@app.delete('/api/mappings/{mapping_id}')
+def delete_mapping(mapping_id: str):
+    mappings = load_mappings()
+    new = [m for m in mappings if m.get('id') != mapping_id]
+    if len(new) == len(mappings):
+        raise HTTPException(404, '映射不存在: %s' % mapping_id)
+    save_mappings(new)
+    return {'ok': True}
+
+
+def load_auto_fill_rules():
+    if os.path.exists(AUTO_FILL_RULES_PATH):
+        try:
+            with open(AUTO_FILL_RULES_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_auto_fill_rules(rules):
+    with open(AUTO_FILL_RULES_PATH, 'w', encoding='utf-8') as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+
+
+@app.get('/api/auto-fill-rules')
+def get_auto_fill_rules():
+    return {'rules': load_auto_fill_rules()}
+
+
+@app.post('/api/auto-fill-rules')
+def set_auto_fill_rules(rules: List[dict]):
+    save_auto_fill_rules(rules)
+    return {'ok': True, 'rules': rules}
+
+
 @app.post('/api/sync/notify')
 def sync_notify(req: NotifyRequest):
     if not req.table or req.pk is None or req.pk == '':
         raise HTTPException(400, 'table / pk 不能为空')
-    mapping = find_mapping_by_table(req.table)
+    mapping = find_mapping_by_table(req.table, req.database or '')
 
     row, fields, pk_col = read_source_row(mapping, req.pk)
     if row is None:
@@ -1046,6 +1172,8 @@ def sync_notify(req: NotifyRequest):
     col_index = {name: i for i, name in enumerate(fields)}
     pk_val = str(row[col_index[pk_col]])
     record = build_jdy_record(mapping, row, col_index, pk_val)
+    if record is None:
+        return {'ok': True, 'skipped': 'transform_skip'}
 
     data_id = jdy_find_by_id(pk_val, mapping.get('data_type_value', ''))
     if data_id:
@@ -1058,6 +1186,74 @@ def sync_notify(req: NotifyRequest):
         action = 'create'
 
     return {'ok': True, 'action': action, 'pk': pk_val}
+
+
+@app.post('/api/sync/notify-batch')
+def sync_notify_batch(req: NotifyBatchRequest):
+    """批量即时同步：对方直接传行数据（源字段名 + 固定 pk），job=1 修改 / job=2 增加"""
+    if not req.table or not req.rows:
+        raise HTTPException(400, 'table / rows 不能为空')
+    if req.job not in (1, 2):
+        raise HTTPException(400, 'job 只能是 1(修改) 或 2(增加)')
+    mapping = find_mapping_by_table(req.table, req.database or '')
+    data_type_value = mapping.get('data_type_value', '')
+
+    success = 0
+    fail = 0
+    skipped = 0
+    results = []
+
+    if req.job == 2:
+        records = []
+        for row in req.rows:
+            pk_raw = row.get('pk')
+            if pk_raw is None or pk_raw == '':
+                fail += 1
+                results.append({'pk': '', 'ok': False, 'reason': 'missing_pk'})
+                continue
+            pk = str(pk_raw)
+            rec = build_jdy_record_from_dict(mapping, row, pk)
+            if rec is None:
+                skipped += 1
+                results.append({'pk': pk, 'ok': False, 'reason': 'transform_skip'})
+                continue
+            records.append((pk, rec))
+        for i in range(0, len(records), JDY_BATCH_SIZE):
+            chunk = records[i:i + JDY_BATCH_SIZE]
+            resp = jdy_batch_create([c[1] for c in chunk])
+            ok_count = resp.get('success_count', 0)
+            success += ok_count
+            fail += len(chunk) - ok_count
+            for c in chunk:
+                results.append({'pk': c[0], 'ok': True})
+            time.sleep(0.2)
+    else:
+        for row in req.rows:
+            pk_raw = row.get('pk')
+            if pk_raw is None or pk_raw == '':
+                fail += 1
+                results.append({'pk': '', 'ok': False, 'reason': 'missing_pk'})
+                continue
+            pk = str(pk_raw)
+            rec = build_jdy_record_from_dict(mapping, row, pk, partial=True)
+            if not rec:
+                skipped += 1
+                results.append({'pk': pk, 'ok': False, 'reason': 'no_fields'})
+                continue
+            data_id = jdy_find_by_id(pk, data_type_value)
+            if not data_id:
+                fail += 1
+                results.append({'pk': pk, 'ok': False, 'reason': 'not_found'})
+                continue
+            try:
+                jdy_update(data_id, rec)
+                success += 1
+                results.append({'pk': pk, 'ok': True})
+            except HTTPException as e:
+                fail += 1
+                results.append({'pk': pk, 'ok': False, 'reason': str(e.detail)})
+
+    return {'ok': True, 'job': req.job, 'success': success, 'fail': fail, 'skipped': skipped, 'results': results}
 
 
 app.mount('/', StaticFiles(directory='static', html=True), name='static')

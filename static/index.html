@@ -86,7 +86,10 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
     <h2>① 后台数据库（左）</h2>
     <div class="label-row">
       <label>数据源</label>
-      <button class="btn mini" onclick="openAddSource()">+ 添加数据源</button>
+      <div>
+        <button class="btn mini" onclick="openAddSource()">+ 添加数据源</button>
+        <button class="btn mini" onclick="openSourceManager()">数据源管理</button>
+      </div>
     </div>
     <div class="search-box">
       <input type="text" id="source" placeholder="搜索或选择数据源…" autocomplete="off" oninput="filterSource()" onfocus="filterSource()">
@@ -116,6 +119,8 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
       <h2>② 字段映射</h2>
       <div class="hint">左侧勾选的字段自动与简道云字段配对，可手动调整右侧对应字段。</div>
       <div id="mappingList" class="mapping"></div>
+      <button class="btn gray" style="margin-top:10px;width:100%;" onclick="saveMapping()">保存映射（供即时同步使用）</button>
+      <button class="btn gray" style="margin-top:6px;width:100%;" onclick="openMappingManager()">映射管理</button>
       <div id="timeFilterBox" style="display:none;margin-top:12px;border-top:1px solid #eee;padding-top:10px;">
         <div class="hint" style="margin-bottom:6px;">时间字段 <b id="timeFieldName"></b>：作为筛选条件，并作为“平台数据创建时间”的来源。</div>
         <label>起始时间（不选日=按月初，不选月=按年初）</label>
@@ -128,6 +133,7 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
       <input type="text" id="platformValue" placeholder="如：金库网班级">
       <label>“数据类型”字段固定值（手写）</label>
       <input type="text" id="dataTypeValue" placeholder="如：手动录入">
+      <button class="btn gray" style="margin-top:4px;width:100%;" onclick="openRuleManager()">规则管理（平台/数据类型自动填充）</button>
       <label>限制条数（0 = 全部）</label>
       <input type="number" id="limitNum" value="0" min="0">
       <button class="btn green" id="btnTransfer" onclick="previewTransfer()">开始传输（先预览）</button>
@@ -194,6 +200,37 @@ label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
   </div>
 </div>
 
+<div class="modal-mask" id="mgrModal" style="display:none;" onclick="if(event.target===this)closeSourceManager()">
+  <div class="modal">
+    <h2>数据源管理</h2>
+    <div id="mgrList"></div>
+    <div class="modal-actions">
+      <button class="btn gray" onclick="closeSourceManager()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="mappingMgrModal" style="display:none;" onclick="if(event.target===this)closeMappingManager()">
+  <div class="modal" style="width:640px;">
+    <h2>映射管理</h2>
+    <div id="mappingMgrList"></div>
+    <div class="modal-actions">
+      <button class="btn gray" onclick="closeMappingManager()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="ruleMgrModal" style="display:none;" onclick="if(event.target===this)closeRuleManager()">
+  <div class="modal" style="width:640px;">
+    <h2>规则管理（平台 / 数据类型自动填充）</h2>
+    <div id="ruleMgrList"></div>
+    <div class="modal-actions">
+      <button class="btn green" onclick="saveRules()">保存规则</button>
+      <button class="btn gray" onclick="closeRuleManager()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let jdyWidgets = [];
 let dbColumns = [];
@@ -215,13 +252,24 @@ let currentIsMerge = false;        // 是否"全部合并"模式
 
 const $ = id => document.getElementById(id);
 
+let autoFillRules = [];
+
 async function init() {
   await loadSources();
   await loadJdyFields();
+  await loadAutoFillRules();
   $('jdyAppId').textContent = '598d1c563788a36bcba8a193 / 6aa0bbef65115c860c3a7bfd';
 }
 
+async function loadAutoFillRules() {
+  try {
+    const r = await fetch('/api/auto-fill-rules').then(x => x.json());
+    autoFillRules = r.rules || [];
+  } catch (e) { autoFillRules = []; }
+}
+
 let currentSourceId = '';
+let editingSourceId = '';
 
 async function loadSources() {
   const r = await fetch('/api/sources').then(x => x.json());
@@ -271,8 +319,9 @@ function renderSourceDrop() {
   });
 }
 
-// ---------- 添加 / 删除数据源 ----------
+// ---------- 添加 / 删除 / 修改数据源 ----------
 function openAddSource() {
+  editingSourceId = '';
   $('srcType').value = 'mysql';
   $('srcName').value = '';
   $('srcHost').value = '';
@@ -290,6 +339,40 @@ function openAddSource() {
 
 function closeAddSource() {
   $('sourceModal').style.display = 'none';
+}
+
+function openSourceManager() {
+  const list = sourceList.map(s =>
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;">'
+    + '<span>' + s.name + ' <span style="color:#999;font-size:11px;">(' + s.id + ')</span></span>'
+    + '<span><button class="btn mini" onclick="editSource(\'' + s.id + '\')">编辑</button> '
+    + '<button class="btn mini red" onclick="deleteSource(\'' + s.id + '\')">删除</button></span>'
+    + '</div>').join('');
+  $('mgrList').innerHTML = list || '<div style="color:#999;">暂无数据源</div>';
+  $('mgrModal').style.display = 'flex';
+}
+
+function closeSourceManager() {
+  $('mgrModal').style.display = 'none';
+}
+
+async function editSource(id) {
+  const s = await fetch('/api/sources/' + encodeURIComponent(id)).then(x => x.json());
+  editingSourceId = id;
+  $('srcType').value = s.type || 'mysql';
+  $('srcName').value = s.name || '';
+  $('srcHost').value = s.host || '';
+  $('srcPort').value = s.port || (s.type === 'oracle' ? '1521' : '3306');
+  $('srcUser').value = s.user || '';
+  $('srcPassword').value = '';
+  $('srcCharset').value = s.charset || 'gbk';
+  $('srcService').value = s.service || '';
+  $('srcSchemas').value = (s.schemas || []).join(',');
+  $('srcInstantClient').value = s.instant_client || '';
+  $('srcMsg').textContent = '';
+  toggleSourceForm();
+  closeSourceManager();
+  $('sourceModal').style.display = 'flex';
 }
 
 function toggleSourceForm() {
@@ -340,8 +423,10 @@ async function saveSource() {
   const msg = $('srcMsg');
   const body = collectSourceForm();
   if (!body.name || !body.host || !body.user) { msg.textContent = '请填写名称、主机、用户名'; msg.className = 'msg err'; return; }
-  const resp = await fetch('/api/sources', {
-    method: 'POST',
+  const url = editingSourceId ? ('/api/sources/' + encodeURIComponent(editingSourceId)) : '/api/sources';
+  const method = editingSourceId ? 'PUT' : 'POST';
+  const resp = await fetch(url, {
+    method: method,
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body)
   });
@@ -349,8 +434,9 @@ async function saveSource() {
   if (!resp.ok) { msg.textContent = (r.detail || JSON.stringify(r)); msg.className = 'msg err'; return; }
   closeAddSource();
   currentSourceId = r.source.id;
+  editingSourceId = '';
   await refreshSources();
-  log('已添加数据源：' + r.source.name);
+  log((method === 'PUT' ? '已修改数据源：' : '已添加数据源：') + r.source.name);
 }
 
 async function deleteSource(id) {
@@ -360,6 +446,7 @@ async function deleteSource(id) {
   if (!resp.ok) { alert((r.detail || '删除失败')); return; }
   if (currentSourceId === id) currentSourceId = '';
   await refreshSources();
+  if ($('mgrModal').style.display === 'flex') openSourceManager();
   log('已删除数据源：' + id);
 }
 
@@ -392,12 +479,7 @@ async function refreshSources() {
 async function loadDatabases() {
   if (!currentSourceId) { dbList = []; $('db').value = ''; renderDrop('db', dbList, onPickDb); return; }
   const r = await fetch('/api/databases?source=' + encodeURIComponent(currentSourceId)).then(x => x.json());
-  let dbs = r.databases || [];
-  if (currentSourceType === 'oracle' && currentSourceSchemas.length > 1) {
-    dbList = ['__ALL__'].concat(dbs);   // 最前加"全部合并"
-  } else {
-    dbList = dbs;
-  }
+  dbList = r.databases || [];
   if (dbList.includes('dpt_product')) $('db').value = 'dpt_product';
   else if (dbList.length > 0) $('db').value = dbList[0];
   else $('db').value = '';
@@ -407,16 +489,8 @@ async function loadDatabases() {
 
 async function loadTables() {
   const db = $('db').value.trim();
-  currentIsMerge = (currentSourceType === 'oracle' && db === '__ALL__');
+  currentIsMerge = false;
   if (!db) { tableList = []; $('table').value = ''; renderDrop('table', tableList, onPickTable); return; }
-  if (currentIsMerge) {
-    // 合并模式：表固定为 CLAZZ（三个 schema 都有），无需查表
-    tableList = ['CLAZZ'];
-    $('table').value = 'CLAZZ';
-    renderDrop('table', tableList, onPickTable);
-    await loadColumns();
-    return;
-  }
   const r = await fetch('/api/tables?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db)).then(x => x.json());
   tableList = r.tables;
   if (tableList.includes('coaching_class')) $('table').value = 'coaching_class';
@@ -428,10 +502,10 @@ async function loadTables() {
 
 async function loadColumns() {
   const db = $('db').value.trim(), table = $('table').value.trim();
-  currentIsMerge = (currentSourceType === 'oracle' && db === '__ALL__');
+  currentIsMerge = false;
+  applyAutoDefaults();
   if (!db || !table) { dbColumns = []; $('dbFields').innerHTML = ''; currentTimeField = ''; updateTimeFilterUI(); return; }
-  const qdb = currentIsMerge ? currentSourceSchemas[0] : db;
-  const r = await fetch('/api/columns?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(qdb) + '&table=' + encodeURIComponent(table)).then(x => x.json());
+  const r = await fetch('/api/columns?source=' + encodeURIComponent(currentSourceId) + '&database=' + encodeURIComponent(db) + '&table=' + encodeURIComponent(table)).then(x => x.json());
   dbColumns = r.columns;
   primaryKey = r.primary_key || 'id';
   const box = $('dbFields');
@@ -463,8 +537,7 @@ function renderDrop(id, items, onPick) {
     dd.innerHTML = '<div class="empty">无匹配</div>';
   } else {
     dd.innerHTML = filtered.map(x => {
-      const label = x === '__ALL__' ? '全部合并(' + currentSourceSchemas.join('/') + ')' : x;
-      return '<div class="opt" data-v="' + x + '">' + label + '</div>';
+      return '<div class="opt" data-v="' + x + '">' + x + '</div>';
     }).join('');
   }
   dd.style.display = 'block';
@@ -606,6 +679,7 @@ function rebuildMapping() {
   const selected = getSelectedDbFields();
   const box = $('mappingList');
   box.innerHTML = '';
+  const isFeixia = curSourceName() === '飞霞系统';
   const tOpts = '<option value="">无转换</option>'
     + '<option value="batch_number">提取批次号</option>'
     + '<option value="city_name">市名+考场</option>';
@@ -617,17 +691,73 @@ function rebuildMapping() {
     row.innerHTML = '<span style="flex:1;">' + src + '</span>'
       + '<span class="arrow">→</span>'
       + '<select class="target-sel">' + opts + '</select>'
-      + '<select class="transform-sel" title="转换规则">' + tOpts + '</select>';
+      + (isFeixia ? '<select class="transform-sel" title="转换规则">' + tOpts + '</select>' : '');
     const sel = row.querySelector('.target-sel');
     const g = guessTarget(src);
     if (g) sel.value = g;
-    const tsel = row.querySelector('.transform-sel');
-    const gt = guessTransform(src);
-    if (gt) tsel.value = gt;
+    if (isFeixia) {
+      const tsel = row.querySelector('.transform-sel');
+      const gt = guessTransform(src);
+      if (gt) tsel.value = gt;
+    }
     box.appendChild(row);
   });
   if (selected.length === 0) box.innerHTML = '<span style="color:#999;">请先在左侧勾选字段。</span>';
   updateTimeFilterUI();
+}
+
+function curSourceName() {
+  const s = sourceList.find(x => x.id === currentSourceId);
+  return s ? (s.name || '') : '';
+}
+
+function applyAutoDefaults() {
+  const sname = curSourceName();
+  const db = $('db').value.trim();
+  const table = $('table').value.trim();
+  const rule = autoFillRules.find(r => r.source_name === sname);
+  if (rule && rule.platform) $('platformValue').value = rule.platform;
+  let dt = '';
+  if (rule) {
+    for (const d of (rule.data_types || [])) {
+      if (d.match === db || d.match === table) { dt = d.value; break; }
+    }
+  }
+  if (dt) $('dataTypeValue').value = dt;
+}
+
+async function saveMapping() {
+  const selected = getSelectedDbFields();
+  if (selected.length === 0) { alert('请先在左侧勾选要映射的字段'); return; }
+  const rows = [...document.querySelectorAll('#mappingList .map-row')];
+  const targetFields = rows.map(r => r.querySelector('.target-sel').value);
+  const transforms = rows.map(r => { const t = r.querySelector('.transform-sel'); return t ? t.value : ''; });
+  const db = $('db').value.trim(), table = $('table').value.trim();
+  if (!db || !table) { alert('请先选择数据库和表'); return; }
+  const mappingId = currentSourceType === 'oracle'
+    ? currentSourceId + '-' + db + '-' + table
+    : currentSourceId + '-' + table;
+  const body = {
+    id: mappingId,
+    source: currentSourceId,
+    database: db,
+    table: table,
+    source_fields: selected,
+    target_fields: targetFields,
+    transforms: transforms,
+    platform_value: $('platformValue').value.trim(),
+    data_type_value: $('dataTypeValue').value.trim(),
+    enabled: true
+  };
+  const resp = await fetch('/api/mappings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  const r = await resp.json();
+  if (!resp.ok) { alert('保存失败：' + (r.detail || JSON.stringify(r))); return; }
+  log('已保存映射：' + mappingId + '（表 ' + table + '）');
+  alert('映射已保存：' + mappingId);
 }
 
 // 读取起始时间，返回 {date_from, date_to}（date_to 恒空；不选日=到月，不选月=到年）
@@ -663,7 +793,7 @@ async function previewTransfer() {
   const selected = getSelectedDbFields();
   const rows = [...document.querySelectorAll('#mappingList .map-row')];
   const targetFields = rows.map(r => r.querySelector('.target-sel').value);
-  const transforms = rows.map(r => r.querySelector('.transform-sel').value);
+  const transforms = rows.map(r => { const t = r.querySelector('.transform-sel'); return t ? t.value : ''; });
   const sourceFields = selected;
 
   if (selected.length === 0) { alert('请先在左侧勾选要传输的字段'); return; }
@@ -821,7 +951,7 @@ async function confirmTransfer() {
   const selected = getSelectedDbFields();
   const rows = [...document.querySelectorAll('#mappingList .map-row')];
   const targetFields = rows.map(r => r.querySelector('.target-sel').value);
-  const transforms = rows.map(r => r.querySelector('.transform-sel').value);
+  const transforms = rows.map(r => { const t = r.querySelector('.transform-sel'); return t ? t.value : ''; });
   const sourceFields = selected;
   const platform = $('platformValue').value.trim();
   const dataType = $('dataTypeValue').value.trim();
@@ -891,6 +1021,125 @@ async function viewJdyData() {
 function log(msg) {
   const el = $('log');
   el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+}
+
+// ---------- 映射管理 ----------
+let mappingMgrData = [];
+
+async function openMappingManager() {
+  const r = await fetch('/api/mappings').then(x => x.json());
+  mappingMgrData = r.mappings || [];
+  renderMappingManager();
+  $('mappingMgrModal').style.display = 'flex';
+}
+
+function closeMappingManager() {
+  $('mappingMgrModal').style.display = 'none';
+}
+
+function renderMappingManager() {
+  if (mappingMgrData.length === 0) {
+    $('mappingMgrList').innerHTML = '<div style="color:#999;">暂无映射</div>';
+    return;
+  }
+  $('mappingMgrList').innerHTML = mappingMgrData.map(m =>
+    '<div style="padding:8px 0;border-bottom:1px solid #eee;">'
+    + '<div><b>' + m.table + '</b> <span style="color:#999;font-size:11px;">(' + m.id + ')</span></div>'
+    + '<div style="color:#666;font-size:12px;">源：' + m.source + ' / 库：' + (m.database || '—') + '　数据类型：' + (m.data_type_value || '—') + '</div>'
+    + '<div style="margin-top:4px;">'
+    + '<button class="btn mini" onclick="editMapping(\'' + m.id + '\')">编辑</button> '
+    + '<button class="btn mini red" onclick="deleteMapping(\'' + m.id + '\')">删除</button>'
+    + '</div></div>').join('');
+}
+
+async function editMapping(id) {
+  const m = await fetch('/api/mappings/' + encodeURIComponent(id)).then(x => x.json());
+  closeMappingManager();
+  currentSourceId = m.source;
+  const s = sourceList.find(x => x.id === m.source);
+  if (s) { $('source').value = s.name; currentSourceType = s.type || 'mysql'; currentSourceSchemas = s.schemas || []; }
+  await loadDatabases();
+  $('db').value = m.database || '';
+  await loadTables();
+  $('table').value = m.table || '';
+  await loadColumns();
+  document.querySelectorAll('#dbFields .field-item input[type=checkbox]').forEach(cb => {
+    cb.checked = (m.source_fields || []).includes(cb.value);
+  });
+  rebuildMapping();
+  const rows = [...document.querySelectorAll('#mappingList .map-row')];
+  rows.forEach((r, i) => {
+    if (m.target_fields && m.target_fields[i]) r.querySelector('.target-sel').value = m.target_fields[i];
+    const t = r.querySelector('.transform-sel');
+    if (t && m.transforms && m.transforms[i]) t.value = m.transforms[i];
+  });
+  if (m.platform_value) $('platformValue').value = m.platform_value;
+  if (m.data_type_value) $('dataTypeValue').value = m.data_type_value;
+  log('已载入映射：' + id + '（核对后点「保存映射」覆盖）');
+}
+
+async function deleteMapping(id) {
+  if (!confirm('确认删除该映射？')) return;
+  const resp = await fetch('/api/mappings/' + encodeURIComponent(id), { method: 'DELETE' });
+  const r = await resp.json();
+  if (!resp.ok) { alert((r.detail || '删除失败')); return; }
+  log('已删除映射：' + id);
+  await openMappingManager();
+}
+
+// ---------- 规则管理 ----------
+let ruleMgrData = [];
+
+async function openRuleManager() {
+  const r = await fetch('/api/auto-fill-rules').then(x => x.json());
+  ruleMgrData = JSON.parse(JSON.stringify(r.rules || []));
+  renderRuleManager();
+  $('ruleMgrModal').style.display = 'flex';
+}
+
+function closeRuleManager() {
+  $('ruleMgrModal').style.display = 'none';
+}
+
+function renderRuleManager() {
+  if (ruleMgrData.length === 0) {
+    $('ruleMgrList').innerHTML = '<div style="color:#999;">暂无规则</div>';
+    return;
+  }
+  $('ruleMgrList').innerHTML = ruleMgrData.map((rule, ri) => {
+    const dtRows = (rule.data_types || []).map((d, di) =>
+      '<div style="display:flex;gap:6px;margin:4px 0;align-items:center;">'
+      + '<input type="text" value="' + esc(d.match) + '" onchange="ruleMgrData[' + ri + '].data_types[' + di + '].match=this.value" placeholder="匹配 库/表">'
+      + '<input type="text" value="' + esc(d.value) + '" onchange="ruleMgrData[' + ri + '].data_types[' + di + '].value=this.value" placeholder="数据类型">'
+      + '<button class="btn mini red" onclick="ruleMgrData[' + ri + '].data_types.splice(' + di + ',1);renderRuleManager()">删</button>'
+      + '</div>').join('');
+    return '<div style="padding:8px 0;border-bottom:1px solid #eee;">'
+      + '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">'
+      + '<input type="text" value="' + esc(rule.source_name) + '" onchange="ruleMgrData[' + ri + '].source_name=this.value" style="flex:1;" placeholder="数据源名">'
+      + '<input type="text" value="' + esc(rule.platform) + '" onchange="ruleMgrData[' + ri + '].platform=this.value" style="flex:1;" placeholder="平台">'
+      + '</div>'
+      + dtRows
+      + '<button class="btn mini" onclick="ruleMgrData[' + ri + '].data_types.push({match:\'\',value:\'\'});renderRuleManager()">+ 添加数据类型规则</button>'
+      + '</div>';
+  }).join('')
+    + '<button class="btn mini" style="margin-top:6px;" onclick="ruleMgrData.push({source_name:\'\',platform:\'\',data_types:[]});renderRuleManager()">+ 添加数据源规则</button>';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function saveRules() {
+  const resp = await fetch('/api/auto-fill-rules', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(ruleMgrData)
+  });
+  const r = await resp.json();
+  if (!resp.ok) { alert('保存失败：' + (r.detail || JSON.stringify(r))); return; }
+  autoFillRules = ruleMgrData;
+  closeRuleManager();
+  log('规则已保存');
 }
 
 init();

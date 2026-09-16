@@ -89,6 +89,11 @@ docs/           # 设计文档
 | 方法 / 路径 | 说明 |
 |---|---|
 | `GET /api/sources` | 数据源列表 |
+| `GET /api/sources/{id}` | 单个数据源完整信息（不含密码） |
+| `POST /api/sources` | 添加数据源 |
+| `PUT /api/sources/{id}` | 修改数据源（密码留空则保留原密码） |
+| `DELETE /api/sources/{id}` | 删除数据源（含内置，同时清 `.env` 密码） |
+| `POST /api/sources/test` | 测试数据源连接 |
 | `GET /api/databases?source=...` | 数据库（Oracle 为 schema）列表 |
 | `GET /api/tables?source=...&database=...` | 表列表 |
 | `GET /api/columns?source=...&database=...&table=...` | 字段列表 + 主键 |
@@ -143,7 +148,8 @@ docs/           # 设计文档
 ```json
 {
   "table": "coaching_class",
-  "pk": "123"
+  "pk": "123",
+  "database": ""
 }
 ```
 
@@ -151,6 +157,7 @@ docs/           # 设计文档
 |---|---|---|
 | `table` | string | 源表名（须已在 `mappings.json` 配置） |
 | `pk` | string | 该行主键值 |
+| `database` | string（可选） | 数据库/schema；MySQL 可省略，Oracle 必填 |
 
 响应：
 

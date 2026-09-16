@@ -10,18 +10,18 @@
       "charset": "gbk"
     },
     {
-      "id": "dpt-aliyun",
       "type": "mysql",
-      "name": "aliyun线上数据库",
+      "name": "大平台后台系统",
       "host": "dptonlyread.rwlb.rds.aliyuncs.com",
       "port": 3306,
       "user": "dptep",
-      "charset": "gbk"
+      "charset": "gbk",
+      "id": "dpt-aliyun",
+      "user_added": false
     },
     {
-      "id": "oracle-clazz",
       "type": "oracle",
-      "name": "Oracle线上库(班级)",
+      "name": "教务系统",
       "host": "114.113.151.60",
       "port": 1521,
       "user": "clazz",
@@ -31,11 +31,13 @@
         "SHFEC",
         "GZFEC"
       ],
-      "instant_client": "D:/Program Files/OracleInstantClient/instantclient_21_15"
+      "instant_client": "D:/Program Files/OracleInstantClient/instantclient_21_15",
+      "id": "oracle-clazz",
+      "user_added": false
     },
     {
       "type": "mysql",
-      "name": "飞霞系统数据库",
+      "name": "飞霞系统",
       "host": "114.113.151.55",
       "port": 3306,
       "user": "chaxun",

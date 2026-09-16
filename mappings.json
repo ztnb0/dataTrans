@@ -1,24 +1,164 @@
 [
   {
-    "id": "coaching-class",
-    "source": "dpt-aliyun",
-    "database": "dptep",
-    "table": "coaching_class",
-    "platform_value": "教务系统",
-    "data_type_value": "班级",
-    "source_fields": ["class_number", "class_name", "class_ctime"],
-    "target_fields": ["_widget_1788918827860", "_widget_1788918827861", "_widget_1788918827862"],
+    "id": "user-src-1789010399-db_plan_positon",
+    "source": "user-src-1789010399",
+    "database": "mexam3",
+    "table": "db_plan_positon",
+    "source_fields": [
+      "PlanPositonID",
+      "ExamPlanName",
+      "ExamAreaName",
+      "ExamDate"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827860",
+      "_widget_1788918827861",
+      "_widget_1788918827862"
+    ],
+    "platform_value": "飞霞系统",
+    "data_type_value": "飞霞db_plan_positon @mexam3---飞霞",
+    "transforms": [
+      "",
+      "batch_number",
+      "city_name",
+      ""
+    ],
     "enabled": true
   },
   {
-    "id": "groupbatch",
+    "id": "dpt-aliyun-coaching_class",
     "source": "dpt-aliyun",
-    "database": "dptep",
+    "database": "dpt_product",
+    "table": "coaching_class",
+    "source_fields": [
+      "id",
+      "class_name",
+      "class_ctime",
+      "class_number"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827861",
+      "_widget_1788918827862",
+      "_widget_1788918827860"
+    ],
+    "platform_value": "大平台后台系统",
+    "data_type_value": "大平台班级",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "enabled": true
+  },
+  {
+    "id": "dpt-aliyun-groupbatch",
+    "source": "dpt-aliyun",
+    "database": "dpt_e-commerce",
     "table": "groupbatch",
+    "source_fields": [
+      "id",
+      "batchName",
+      "createDate",
+      "classnumber"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827861",
+      "_widget_1788918827862",
+      "_widget_1788918827860"
+    ],
+    "platform_value": "大平台后台系统",
+    "data_type_value": "大平台期次",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "enabled": true
+  },
+  {
+    "id": "oracle-clazz-BFEC-CLAZZ",
+    "source": "oracle-clazz",
+    "database": "BFEC",
+    "table": "CLAZZ",
+    "source_fields": [
+      "CLASS_ID",
+      "CLASS_CODE",
+      "CLASS_NAME",
+      "BEGIN_YEAR"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827860",
+      "_widget_1788918827861",
+      "_widget_1788918827862"
+    ],
     "platform_value": "教务系统",
-    "data_type_value": "期次",
-    "source_fields": ["classnumber", "batchName", "createDate"],
-    "target_fields": ["_widget_1788918827860", "_widget_1788918827861", "_widget_1788918827862"],
+    "data_type_value": "教务北京",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "enabled": true
+  },
+  {
+    "id": "oracle-clazz-GZFEC-CLAZZ",
+    "source": "oracle-clazz",
+    "database": "GZFEC",
+    "table": "CLAZZ",
+    "source_fields": [
+      "CLASS_ID",
+      "CLASS_CODE",
+      "CLASS_NAME",
+      "BEGIN_YEAR"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827860",
+      "_widget_1788918827861",
+      "_widget_1788918827862"
+    ],
+    "platform_value": "教务系统",
+    "data_type_value": "教务广州",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "enabled": true
+  },
+  {
+    "id": "oracle-clazz-SHFEC-CLAZZ",
+    "source": "oracle-clazz",
+    "database": "SHFEC",
+    "table": "CLAZZ",
+    "source_fields": [
+      "CLASS_ID",
+      "CLASS_CODE",
+      "CLASS_NAME",
+      "BEGIN_YEAR"
+    ],
+    "target_fields": [
+      "_widget_1789030761638",
+      "_widget_1788918827860",
+      "_widget_1788918827861",
+      "_widget_1788918827862"
+    ],
+    "platform_value": "教务系统",
+    "data_type_value": "教务上海",
+    "transforms": [
+      "",
+      "",
+      "",
+      ""
+    ],
     "enabled": true
   }
 ]

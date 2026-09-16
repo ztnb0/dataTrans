@@ -1,0 +1,44 @@
+[
+  {
+    "source_name": "大平台后台系统",
+    "platform": "大平台后台系统",
+    "data_types": [
+      {
+        "match": "dpt_product",
+        "value": "大平台班级"
+      },
+      {
+        "match": "dpt_e-commerce",
+        "value": "大平台期次"
+      }
+    ]
+  },
+  {
+    "source_name": "教务系统",
+    "platform": "教务系统",
+    "data_types": [
+      {
+        "match": "BFEC",
+        "value": "教务北京"
+      },
+      {
+        "match": "SHFEC",
+        "value": "教务上海"
+      },
+      {
+        "match": "GZFEC",
+        "value": "教务广州"
+      }
+    ]
+  },
+  {
+    "source_name": "飞霞系统",
+    "platform": "飞霞系统",
+    "data_types": [
+      {
+        "match": "db_plan_positon",
+        "value": "飞霞"
+      }
+    ]
+  }
+]
