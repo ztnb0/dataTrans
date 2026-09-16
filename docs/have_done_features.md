@@ -12,6 +12,7 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 - 后端：Python + FastAPI（`app.py`）
 - 前端：单页 HTML（`static/index.html`）
 - 运行：`python -m uvicorn app:app --host 0.0.0.0 --port 8088`
+- 生产部署：已上线公司内网服务器 `http://192.168.6.138:8088`（Ubuntu 24.04，ARM64），由 systemd 服务 `datatrans` 托管，详见 `docs/部署上线文档.md`。
 
 ---
 
@@ -73,7 +74,7 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 - 字符集 `gbk`（中文正常）。
 
 ### 11. Oracle 数据源支持
-- `oracledb`（thick 模式）+ Oracle Instant Client 21。
+- `oracledb`（thick 模式）+ Oracle Instant Client（开发机 x64 用 21c；生产服务器 ARM64 用 19c，因 23ai 客户端不支持 10g）。
 - 元数据方言：`all_tables` / `all_tab_columns` / `all_col_comments` / `all_constraints`。
 - 支持多 schema（`BFEC`/`SHFEC`/`GZFEC` 的 `CLAZZ`），`ROWNUM` 分页、`:1` 占位符、双引号标识符。
 - 字符集 `ZHS16GBK`；`BEGIN_YEAR`（NUMBER 年份）自动按年份处理。
@@ -101,7 +102,7 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 | 简道云 `batch_update` | ⚠️ 只能把多条改成同一固定值 |
 | 简道云 `delete` / `batch_delete` | ❌ 未授权（源表删除无法同步） |
 | 简道云 list 分页 | ✅ 用 `limit` + `skip` 分页拉取（实测有效） |
-| Oracle 版本 | 10g（10.2.0.5.0），需 Instant Client 21 + thick 模式 |
+| Oracle 版本 | 10g（10.2.0.5.0），需 thick 模式 + Instant Client（x64 用 21c / ARM64 用 19c；23ai 客户端不支持 10g，thin 模式也不支持） |
 | Oracle 表归属 | `BFEC`/`SHFEC`/`GZFEC` 三个 schema，登录用户 `clazz` 下无表 |
 | Oracle 账号权限 | 仅 `CREATE SESSION`（无时间戳字段，走 hash 对比） |
 | 阿里云只读库 `dptep` | 字段级 SELECT 授权：映射字段能查，但 `SELECT *` 及 `groupbatch.mtime` 无权限（故全表 hash 对比，不用 mtime） |
@@ -152,19 +153,20 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
 
 | 依赖 | 说明 |
 |---|---|
-| Python 3.14 | 运行环境 |
+| Python | 开发机 3.14；生产服务器 3.12（venv） |
 | fastapi / uvicorn | Web 框架 |
 | pymysql | MySQL 驱动 |
 | requests | 简道云 API |
 | oracledb | Oracle 驱动 |
-| Oracle Instant Client 21 | Oracle thick 模式（路径在 `config.json` 配置） |
-| VS2013 运行库 | Instant Client 依赖（`msvcr120.dll`） |
+| Oracle Instant Client | Oracle thick 模式（开发机 x64：21c + VS2013 运行库；生产服务器 ARM64：19.32 + libaio，路径在 `config.json` 配置） |
+
+> 生产服务器额外依赖：`libaio1t64`（Ubuntu 24.04 改名，需补 `libaio.so.1` 软链接），客户端目录 `/opt/oracle/instantclient_19_32` 已注册进 `ldconfig`。
 
 ---
 
 ## 七、Git 分支与提交
 
-- 当前分支：`feature/大平台后台-即时同步`
+- 当前分支：`main`（线上部署与文档均已并入 main）
 - 已完成提交（按时间）：
   - `edee1b6` 数据迁移工具：MySQL多数据源 → 简道云（预览确认、字段映射、时间筛选）
   - `54dd7ac` 密码脱敏：密码与 APIKey 移入 .env，新增 README
@@ -177,8 +179,8 @@ dataTrans 是一个 Web 小工具：后台数据库（MySQL / Oracle）→ 简�
   - `12f668a` 即时同步回调接口（mappings + notify）+ 前端数据类型字段
   - `5970edf` 合并 feature/自定义添加数据源
   - `8bdd097` 接口回调即时同步方案实现（mappings + notify-batch + 数据源管理 + 自动填充规则），后续暂停改轮巡
-
-> 注：轮巡即时同步方案（单源/全部同步按钮、对账、hash 对比、查重覆盖、时间筛选等）的代码与文档已完成，尚未提交。
+  - `b3799fd` 轮巡即时同步方案（单源/全部同步按钮、对账、hash对比、查重覆盖、时间筛选2026、重置同步、表单分页+平台统计）
+  - （最新）上线部署：迁移到内网 Linux 服务器、Oracle ARM64 客户端适配、systemd 托管、README/部署文档更新
 
 ---
 

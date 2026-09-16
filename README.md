@@ -2,7 +2,28 @@
 
 后台 MySQL 数据库 → 简道云表单的数据传输工具。支持多数据源、字段映射、时间筛选、预览确认、逐行勾选排除，以及基于回调的即时同步。
 
-## 快速开始
+## 生产环境（公司内网服务器）
+
+已部署在公司内网 Linux 服务器上，内网浏览器直接访问：
+
+```
+http://192.168.6.138:8088
+```
+
+- 服务器：Ubuntu 24.04（ARM64），应用目录 `/home/spark1/dataTrans`。
+- 由 systemd 服务 `datatrans` 托管，开机自启、崩溃自动重启。
+- 4 个数据源（含 Oracle 教务系统）与简道云均已配好，无需重新配置。
+
+```bash
+# 常用运维命令（在服务器上执行）
+sudo systemctl status datatrans     # 查看状态
+sudo systemctl restart datatrans    # 重启（改 config.json/.env/mappings.json 后）
+sudo journalctl -u datatrans -f     # 实时看日志
+```
+
+> 完整的部署记录、使用说明、注意事项见 `docs/部署上线文档.md`。
+
+## 快速开始（本地开发）
 
 ```bash
 python -m uvicorn app:app --host 0.0.0.0 --port 8088
@@ -64,7 +85,8 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8088
 
 ## 重启服务
 
-先在命令行 Ctrl+C 停掉正在运行的服务，再重新执行：
+- **生产服务器**：`sudo systemctl restart datatrans`
+- **本地开发**：先在命令行 Ctrl+C 停掉正在运行的服务，再重新执行：
 
 ```bash
 python -m uvicorn app:app --host 0.0.0.0 --port 8088
